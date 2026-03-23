@@ -2,6 +2,7 @@
 
 import json
 import logging
+import queue
 import re
 import threading
 import time as _time
@@ -82,7 +83,8 @@ class Conductor:
         self.cwd = cwd
         self.agents = agents or {}
         self.conductor_override = conductor_override
-        self.conductor_session_id: Optional[str] = None  # CLI session for conductor
+        self.conductor_session_id: Optional[str] = None
+        self.user_queue: queue.Queue = queue.Queue()  # For mid-execution user input
 
     def _conductor_generate_standalone(self, prompt: str) -> LLMResponse:
         """Standalone conductor call WITHOUT --resume. Used for session summaries."""
@@ -399,6 +401,7 @@ TOPICS: <comma-separated keywords>"""
         completed_summaries = []
         start_time = _time.time()
         stop_ticker = threading.Event()
+        skip_remaining = threading.Event()
 
         def _conductor_brief(status_prompt: str):
             """Quick conductor call for natural status update."""
@@ -411,20 +414,52 @@ TOPICS: <comma-separated keywords>"""
             except Exception:
                 pass
 
-        def _ticker():
-            """Periodically ask conductor for a natural waiting update."""
-            while not stop_ticker.is_set():
-                stop_ticker.wait(25)
-                if stop_ticker.is_set() or not pending:
-                    break
+        def _check_user_input():
+            """Check if user typed something during tool execution."""
+            try:
+                msg = self.user_queue.get_nowait()
+                if not msg:
+                    return
+                lower = msg.lower().strip()
+                # Skip/cancel commands
+                if lower in ("skip", "atla", "devam", "devam et", "continue", "s"):
+                    console.print(f"[yellow]  → Skipping remaining models...[/yellow]")
+                    skip_remaining.set()
+                    stop_ticker.set()
+                    return
+                # Any other message: pass to conductor for a brief response
                 elapsed = int(_time.time() - start_time)
                 waiting = ", ".join(model_names[n] for n in pending)
                 done_names = [model_names[n] for n in available if n not in pending]
                 done_str = ", ".join(done_names) if done_names else "none yet"
                 _conductor_brief(
-                    f"STATUS UPDATE REQUEST: {elapsed}s elapsed. Done: {done_str}. Still working: {waiting}. "
-                    f"Give user a brief natural 1-sentence update about the wait. Match the user's language. No tools."
+                    f"USER MESSAGE during tool execution: \"{msg}\". "
+                    f"Status: {elapsed}s elapsed, done: {done_str}, waiting: {waiting}. "
+                    f"Respond naturally to the user's message considering the current status. "
+                    f"Match the user's language. No tools."
                 )
+            except queue.Empty:
+                pass
+
+        def _ticker():
+            """Periodically check user input and provide natural waiting updates."""
+            tick_count = 0
+            while not stop_ticker.is_set():
+                stop_ticker.wait(5)  # Check user input every 5s
+                if stop_ticker.is_set() or not pending:
+                    break
+                _check_user_input()
+                tick_count += 1
+                # Conductor status update every 25s (every 5th tick)
+                if tick_count % 5 == 0:
+                    elapsed = int(_time.time() - start_time)
+                    waiting = ", ".join(model_names[n] for n in pending)
+                    done_names = [model_names[n] for n in available if n not in pending]
+                    done_str = ", ".join(done_names) if done_names else "none yet"
+                    _conductor_brief(
+                        f"STATUS UPDATE REQUEST: {elapsed}s elapsed. Done: {done_str}. Still working: {waiting}. "
+                        f"Give user a brief natural 1-sentence update about the wait. Match the user's language. No tools."
+                    )
 
         ticker_thread = threading.Thread(target=_ticker, daemon=True)
         ticker_thread.start()
@@ -432,6 +467,8 @@ TOPICS: <comma-separated keywords>"""
         with ThreadPoolExecutor(max_workers=len(available)) as pool:
             futures = {pool.submit(_call, name): name for name in available}
             for future in as_completed(futures):
+                if skip_remaining.is_set():
+                    break
                 try:
                     name, response = future.result()
                     results[name] = response
@@ -451,8 +488,9 @@ TOPICS: <comma-separated keywords>"""
                         summary = response.text[:300].replace('\n', ' ')
                         completed_summaries.append(f"{display}: {summary}")
 
-                        # Ask conductor to comment on this result
-                        if pending:
+                        # Ask conductor to comment + check user input
+                        _check_user_input()
+                        if pending and not skip_remaining.is_set():
                             waiting = ", ".join(model_names[n] for n in pending)
                             _conductor_brief(
                                 f"MODEL COMPLETED: {display} responded in {duration_s:.0f}s. Summary: {summary}... "

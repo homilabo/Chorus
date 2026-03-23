@@ -1,6 +1,7 @@
 """Interactive REPL - the main user interface for Chorus."""
 
 import sys
+import threading
 from typing import Optional
 
 from rich.console import Console
@@ -113,15 +114,55 @@ def run_conductor(cwd: Optional[str] = None):
         border_style="blue",
     ))
 
+    # Shared input queue — all stdin reading goes through here
+    input_q = conductor.user_queue
+
+    def _input_loop():
+        """Background thread: continuously reads stdin into queue."""
+        while True:
+            try:
+                line = sys.stdin.readline()
+                if not line:  # EOF
+                    input_q.put(None)
+                    break
+                input_q.put(line.strip())
+            except (ValueError, OSError):
+                input_q.put(None)
+                break
+
+    input_thread = threading.Thread(target=_input_loop, daemon=True)
+    input_thread.start()
+
+    def _get_input(prompt: str = "[bold blue]chorus>[/bold blue] ") -> str:
+        """Get next user input, showing prompt. Returns empty string on EOF/interrupt."""
+        console.print()
+        console.print(prompt, end="")
+        # Drain any stale messages from queue (typed during tool execution)
+        while not input_q.empty():
+            try:
+                input_q.get_nowait()
+            except Exception:
+                break
+        # Wait for fresh input
+        try:
+            msg = input_q.get()
+            if msg is None:
+                return ""
+            return msg
+        except Exception:
+            return ""
+
     while True:
         try:
-            console.print()
-            user_input = console.input("[bold blue]chorus>[/bold blue] ").strip()
-        except (EOFError, KeyboardInterrupt):
+            user_input = _get_input()
+        except KeyboardInterrupt:
             console.print("\n[dim]Goodbye.[/dim]")
             break
 
         if not user_input:
+            if not input_thread.is_alive():
+                console.print("\n[dim]Goodbye.[/dim]")
+                break
             continue
 
         if user_input in ("/quit", "/exit", "/q"):
