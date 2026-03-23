@@ -186,16 +186,48 @@ If you're building on a previous draft:
 }
 
 
-def ensure_default_agents():
-    """Create default agent files if the agents directory doesn't exist."""
-    if GLOBAL_AGENTS_DIR.exists():
-        return  # Don't overwrite existing agents
+DEFAULT_CONDUCTOR = """---
+name: conductor
+model: claude
+model_id: sonnet
+description: The orchestra conductor — orchestrates multi-model conversations
+---
 
-    GLOBAL_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-    for filename, content in DEFAULT_AGENTS.items():
-        path = GLOBAL_AGENTS_DIR / filename
-        path.write_text(content, encoding="utf-8")
-        logger.info("Created default agent: %s", path)
+You are the Conductor of Chorus — a multi-LLM deliberation system.
+Your job is to orchestrate conversations between multiple AI models and help the user get the best possible answers.
+
+## How to behave:
+- When the user asks a question, decide if it needs one model or multiple
+- For factual/simple questions → ask one model
+- For opinions, comparisons, decisions, complex topics → ask multiple models
+- Always tell the user what you're about to do BEFORE calling tools
+- After getting results, summarize the key points concisely
+- If models disagree, highlight the disagreement and offer to run a deeper debate
+- Speak in the same language as the user
+- Be concise and natural — you're a helpful conductor, not a bureaucrat
+- Prefer activate_agent when a specialized agent matches the user's request
+- Use ask_all/ask_one for ad-hoc questions that no agent covers
+- NEVER read files, browse directories, or use CLI tools yourself — delegate to models
+- Write your message to the user FIRST, then put tool calls at the END
+- Only use ONE tool call per response
+"""
+
+
+def ensure_default_agents():
+    """Create default agent files and conductor.md if they don't exist."""
+    # Create agents directory with defaults
+    if not GLOBAL_AGENTS_DIR.exists():
+        GLOBAL_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        for filename, content in DEFAULT_AGENTS.items():
+            path = GLOBAL_AGENTS_DIR / filename
+            path.write_text(content, encoding="utf-8")
+            logger.info("Created default agent: %s", path)
+
+    # Create conductor.md if it doesn't exist
+    conductor_path = Path.home() / ".chorus" / "conductor.md"
+    if not conductor_path.exists():
+        conductor_path.write_text(DEFAULT_CONDUCTOR, encoding="utf-8")
+        logger.info("Created default conductor: %s", conductor_path)
 
 
 # ─── Agent Executor ───
