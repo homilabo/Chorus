@@ -217,31 +217,41 @@ TOPICS: <comma-separated keywords>"""
             )
             duration_ms = int((time.time() - start) * 1000)
 
+            # Try to parse JSON first (even if returncode != 0, stdout may have valid JSON)
+            data = None
+            if result.stdout and result.stdout.strip():
+                try:
+                    data = _json.loads(result.stdout)
+                except _json.JSONDecodeError:
+                    pass
+
+            if data:
+                text = data.get("result", data.get("text", ""))
+                session_id = data.get("session_id", self.conductor_session_id)
+                subtype = data.get("subtype", "")
+
+                # Handle max_turns error — conductor tried to use tools but couldn't
+                if subtype == "error_max_turns":
+                    return LLMResponse(
+                        text="", model=model, provider="claude",
+                        error="Conductor tried to use tools. Retrying with clearer instructions.",
+                        session_id=session_id, duration_ms=duration_ms,
+                    )
+
+                if text and str(text).strip():
+                    return LLMResponse(text=str(text), model=model, provider="claude", session_id=session_id, duration_ms=duration_ms)
+
+            # No valid JSON or empty text — check returncode
             if result.returncode != 0:
                 error_msg = result.stderr.strip()[:200] if result.stderr else "Unknown error"
                 return LLMResponse(text="", model=model, provider="claude", error=error_msg, duration_ms=duration_ms)
 
-            data = _json.loads(result.stdout)
-            text = data.get("result", data.get("text", ""))
-            session_id = data.get("session_id", self.conductor_session_id)
-            subtype = data.get("subtype", "")
-            is_error = data.get("is_error", False)
-
-            # Handle max_turns error — conductor tried to use tools but couldn't
-            if subtype == "error_max_turns" and (not text or not str(text).strip()):
-                return LLMResponse(
-                    text="", model=model, provider="claude",
-                    error="Conductor tried to use tools. Retrying with clearer instructions.",
-                    session_id=session_id, duration_ms=duration_ms,
-                )
-
-            if not text or not str(text).strip():
-                # Don't return raw JSON — return empty with error
-                return LLMResponse(
-                    text="", model=model, provider="claude",
-                    error="Empty response from conductor",
-                    session_id=session_id, duration_ms=duration_ms,
-                )
+            # Success but empty
+            return LLMResponse(
+                text="", model=model, provider="claude",
+                error="Empty response from conductor",
+                duration_ms=duration_ms,
+            )
 
             return LLMResponse(text=str(text), model=model, provider="claude", session_id=session_id, duration_ms=duration_ms)
 
@@ -696,6 +706,10 @@ Decide which tool to use and respond. Example:
 
         # Extract tool calls from conductor's response
         display_text, tool_calls = self._extract_tool_calls(response.text)
+
+        # Safety: don't show raw JSON to user
+        if display_text and display_text.strip().startswith('{"type"'):
+            display_text = ""
 
         # Show conductor's message to user
         if display_text:
