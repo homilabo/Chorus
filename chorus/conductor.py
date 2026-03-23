@@ -659,11 +659,33 @@ TOPICS: <comma-separated keywords>"""
         with Status("[bold blue]Chorus is thinking...[/bold blue]", console=console, spinner="dots"):
             response = self._conductor_generate(full_prompt)
 
-        # If conductor tried to use tools (max_turns hit), retry with explicit instruction
+        # If conductor tried to use tools (max_turns hit), retry with standalone call
         if response.error and "Retrying" in response.error:
-            retry_prompt = full_prompt + "\n\nIMPORTANT: You MUST NOT read files or use any CLI tools yourself. You are the CONDUCTOR. Delegate all work to the other models using ask_all or ask_one tools. Just decide which models to ask and what prompt to give them. Respond with text + tool calls only."
+            # Build a shorter, more direct prompt without resume
+            available = get_available_providers()
+            model_list = ", ".join(available.keys())
+            agent_list = ", ".join(self.agents.keys()) if self.agents else "none"
+
+            retry_prompt = f"""You are the Chorus conductor. You MUST NOT use any CLI tools or read files.
+You can ONLY respond with text and ONE tool call block.
+
+Available tools: ask_all, ask_one, activate_agent, cross_send, search_memory
+Available models: {model_list}
+Available agents: {agent_list}
+
+The user said: {user_message}
+
+Decide which tool to use and respond. Example:
+"I'll ask all models to research this topic."
+```tool
+{{"tool": "ask_all", "prompt": "your prompt here"}}
+```"""
+
             with Status("[bold blue]Chorus is re-thinking...[/bold blue]", console=console, spinner="dots"):
-                response = self._conductor_generate(retry_prompt)
+                response = self._conductor_generate_standalone(retry_prompt)
+
+            if response.session_id:
+                self.conductor_session_id = response.session_id
 
         if response.error:
             console.print(f"[red]Conductor error: {response.error}[/red]")
