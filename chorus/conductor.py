@@ -2,7 +2,6 @@
 
 import json
 import logging
-import queue
 import re
 import threading
 import time as _time
@@ -83,8 +82,7 @@ class Conductor:
         self.cwd = cwd
         self.agents = agents or {}
         self.conductor_override = conductor_override
-        self.conductor_session_id: Optional[str] = None
-        self.user_queue: queue.Queue = queue.Queue()  # For mid-execution user input
+        self.conductor_session_id: Optional[str] = None  # CLI session for conductor
 
     def _conductor_generate_standalone(self, prompt: str) -> LLMResponse:
         """Standalone conductor call WITHOUT --resume. Used for session summaries."""
@@ -201,7 +199,7 @@ TOPICS: <comma-separated keywords>"""
             "--output-format", "json",
             "--model", model,
             "--dangerously-skip-permissions",
-            "--max-turns", "1",  # Key: only 1 turn, no tool use
+            "--max-turns", "2",  # 2 turns: enough to think + respond, not enough for long tool chains
         ]
         if self.conductor_session_id:
             cmd.extend(["--resume", self.conductor_session_id])
@@ -217,41 +215,31 @@ TOPICS: <comma-separated keywords>"""
             )
             duration_ms = int((time.time() - start) * 1000)
 
-            # Try to parse JSON first (even if returncode != 0, stdout may have valid JSON)
-            data = None
-            if result.stdout and result.stdout.strip():
-                try:
-                    data = _json.loads(result.stdout)
-                except _json.JSONDecodeError:
-                    pass
-
-            if data:
-                text = data.get("result", data.get("text", ""))
-                session_id = data.get("session_id", self.conductor_session_id)
-                subtype = data.get("subtype", "")
-
-                # Handle max_turns error — conductor tried to use tools but couldn't
-                if subtype == "error_max_turns":
-                    return LLMResponse(
-                        text="", model=model, provider="claude",
-                        error="Conductor tried to use tools. Retrying with clearer instructions.",
-                        session_id=session_id, duration_ms=duration_ms,
-                    )
-
-                if text and str(text).strip():
-                    return LLMResponse(text=str(text), model=model, provider="claude", session_id=session_id, duration_ms=duration_ms)
-
-            # No valid JSON or empty text — check returncode
             if result.returncode != 0:
                 error_msg = result.stderr.strip()[:200] if result.stderr else "Unknown error"
                 return LLMResponse(text="", model=model, provider="claude", error=error_msg, duration_ms=duration_ms)
 
-            # Success but empty
-            return LLMResponse(
-                text="", model=model, provider="claude",
-                error="Empty response from conductor",
-                duration_ms=duration_ms,
-            )
+            data = _json.loads(result.stdout)
+            text = data.get("result", data.get("text", ""))
+            session_id = data.get("session_id", self.conductor_session_id)
+            subtype = data.get("subtype", "")
+            is_error = data.get("is_error", False)
+
+            # Handle max_turns error — conductor tried to use tools but couldn't
+            if subtype == "error_max_turns" and (not text or not str(text).strip()):
+                return LLMResponse(
+                    text="", model=model, provider="claude",
+                    error="Conductor tried to use tools. Retrying with clearer instructions.",
+                    session_id=session_id, duration_ms=duration_ms,
+                )
+
+            if not text or not str(text).strip():
+                # Don't return raw JSON — return empty with error
+                return LLMResponse(
+                    text="", model=model, provider="claude",
+                    error="Empty response from conductor",
+                    session_id=session_id, duration_ms=duration_ms,
+                )
 
             return LLMResponse(text=str(text), model=model, provider="claude", session_id=session_id, duration_ms=duration_ms)
 
@@ -411,7 +399,6 @@ TOPICS: <comma-separated keywords>"""
         completed_summaries = []
         start_time = _time.time()
         stop_ticker = threading.Event()
-        skip_remaining = threading.Event()
 
         def _conductor_brief(status_prompt: str):
             """Quick conductor call for natural status update."""
@@ -424,52 +411,20 @@ TOPICS: <comma-separated keywords>"""
             except Exception:
                 pass
 
-        def _check_user_input():
-            """Check if user typed something during tool execution."""
-            try:
-                msg = self.user_queue.get_nowait()
-                if not msg:
-                    return
-                lower = msg.lower().strip()
-                # Skip/cancel commands
-                if lower in ("skip", "atla", "devam", "devam et", "continue", "s"):
-                    console.print(f"[yellow]  → Skipping remaining models...[/yellow]")
-                    skip_remaining.set()
-                    stop_ticker.set()
-                    return
-                # Any other message: pass to conductor for a brief response
+        def _ticker():
+            """Periodically ask conductor for a natural waiting update."""
+            while not stop_ticker.is_set():
+                stop_ticker.wait(25)
+                if stop_ticker.is_set() or not pending:
+                    break
                 elapsed = int(_time.time() - start_time)
                 waiting = ", ".join(model_names[n] for n in pending)
                 done_names = [model_names[n] for n in available if n not in pending]
                 done_str = ", ".join(done_names) if done_names else "none yet"
                 _conductor_brief(
-                    f"USER MESSAGE during tool execution: \"{msg}\". "
-                    f"Status: {elapsed}s elapsed, done: {done_str}, waiting: {waiting}. "
-                    f"Respond naturally to the user's message considering the current status. "
-                    f"Match the user's language. No tools."
+                    f"STATUS UPDATE REQUEST: {elapsed}s elapsed. Done: {done_str}. Still working: {waiting}. "
+                    f"Give user a brief natural 1-sentence update about the wait. Match the user's language. No tools."
                 )
-            except queue.Empty:
-                pass
-
-        def _ticker():
-            """Periodically check user input and provide natural waiting updates."""
-            tick_count = 0
-            while not stop_ticker.is_set():
-                stop_ticker.wait(5)  # Check user input every 5s
-                if stop_ticker.is_set() or not pending:
-                    break
-                _check_user_input()
-                tick_count += 1
-                # Conductor status update every 25s (every 5th tick)
-                if tick_count % 5 == 0:
-                    elapsed = int(_time.time() - start_time)
-                    waiting = ", ".join(model_names[n] for n in pending)
-                    done_names = [model_names[n] for n in available if n not in pending]
-                    done_str = ", ".join(done_names) if done_names else "none yet"
-                    _conductor_brief(
-                        f"STATUS UPDATE REQUEST: {elapsed}s elapsed. Done: {done_str}. Still working: {waiting}. "
-                        f"Give user a brief natural 1-sentence update about the wait. Match the user's language. No tools."
-                    )
 
         ticker_thread = threading.Thread(target=_ticker, daemon=True)
         ticker_thread.start()
@@ -477,8 +432,6 @@ TOPICS: <comma-separated keywords>"""
         with ThreadPoolExecutor(max_workers=len(available)) as pool:
             futures = {pool.submit(_call, name): name for name in available}
             for future in as_completed(futures):
-                if skip_remaining.is_set():
-                    break
                 try:
                     name, response = future.result()
                     results[name] = response
@@ -498,9 +451,8 @@ TOPICS: <comma-separated keywords>"""
                         summary = response.text[:300].replace('\n', ' ')
                         completed_summaries.append(f"{display}: {summary}")
 
-                        # Ask conductor to comment + check user input
-                        _check_user_input()
-                        if pending and not skip_remaining.is_set():
+                        # Ask conductor to comment on this result
+                        if pending:
                             waiting = ", ".join(model_names[n] for n in pending)
                             _conductor_brief(
                                 f"MODEL COMPLETED: {display} responded in {duration_s:.0f}s. Summary: {summary}... "
@@ -669,33 +621,11 @@ TOPICS: <comma-separated keywords>"""
         with Status("[bold blue]Chorus is thinking...[/bold blue]", console=console, spinner="dots"):
             response = self._conductor_generate(full_prompt)
 
-        # If conductor tried to use tools (max_turns hit), retry with standalone call
+        # If conductor tried to use tools (max_turns hit), retry with explicit instruction
         if response.error and "Retrying" in response.error:
-            # Build a shorter, more direct prompt without resume
-            available = get_available_providers()
-            model_list = ", ".join(available.keys())
-            agent_list = ", ".join(self.agents.keys()) if self.agents else "none"
-
-            retry_prompt = f"""You are the Chorus conductor. You MUST NOT use any CLI tools or read files.
-You can ONLY respond with text and ONE tool call block.
-
-Available tools: ask_all, ask_one, activate_agent, cross_send, search_memory
-Available models: {model_list}
-Available agents: {agent_list}
-
-The user said: {user_message}
-
-Decide which tool to use and respond. Example:
-"I'll ask all models to research this topic."
-```tool
-{{"tool": "ask_all", "prompt": "your prompt here"}}
-```"""
-
+            retry_prompt = full_prompt + "\n\nIMPORTANT: You MUST NOT read files or use any CLI tools yourself. You are the CONDUCTOR. Delegate all work to the other models using ask_all or ask_one tools. Just decide which models to ask and what prompt to give them. Respond with text + tool calls only."
             with Status("[bold blue]Chorus is re-thinking...[/bold blue]", console=console, spinner="dots"):
-                response = self._conductor_generate_standalone(retry_prompt)
-
-            if response.session_id:
-                self.conductor_session_id = response.session_id
+                response = self._conductor_generate(retry_prompt)
 
         if response.error:
             console.print(f"[red]Conductor error: {response.error}[/red]")
@@ -707,8 +637,8 @@ Decide which tool to use and respond. Example:
         # Extract tool calls from conductor's response
         display_text, tool_calls = self._extract_tool_calls(response.text)
 
-        # Safety: don't show raw JSON to user
-        if display_text and display_text.strip().startswith('{"type"'):
+        # Safety: never show raw JSON to user
+        if display_text and display_text.strip().startswith('{"'):
             display_text = ""
 
         # Show conductor's message to user
