@@ -24,7 +24,7 @@ def call_gemini(prompt: str, model: str = None, timeout: int = 300, cwd: str = N
     config = get_provider_config("gemini") or {}
     model = model or config.get("model", "gemini-2.5-pro")
     timeout = config.get("timeout", timeout)
-    cmd = ["gemini", "-p", prompt, "--model", model, "--sandbox", "false"]
+    cmd = ["gemini", "-p", prompt, "--model", model, "--sandbox", "false", "--allowed-mcp-server-names", ""]
     return _run(cmd, timeout, cwd)
 
 
@@ -88,7 +88,20 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
             if parsed:
                 text = str(parsed)
         except json.JSONDecodeError:
-            pass
+            # Try JSONL (Codex outputs newline-delimited JSON events)
+            for line in text.split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                    if event.get("type") == "item.completed":
+                        item_text = event.get("item", {}).get("text", "")
+                        if item_text:
+                            text = item_text
+                            break
+                except json.JSONDecodeError:
+                    continue
 
         return CLIResult(text=text, duration_ms=duration)
 
