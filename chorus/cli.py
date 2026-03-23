@@ -24,7 +24,7 @@ def call_gemini(prompt: str, model: str = None, timeout: int = 300, cwd: str = N
     config = get_provider_config("gemini") or {}
     model = model or config.get("model", "gemini-2.5-pro")
     timeout = config.get("timeout", timeout)
-    cmd = ["gemini", "-p", prompt, "--model", model]
+    cmd = ["gemini", "-p", prompt, "--model", model, "--sandbox", "false"]
     return _run(cmd, timeout, cwd)
 
 
@@ -33,7 +33,7 @@ def call_copilot(prompt: str, model: str = None, timeout: int = 300, cwd: str = 
     config = get_provider_config("copilot") or {}
     model = model or config.get("model", "gpt-5-mini")
     timeout = config.get("timeout", timeout)
-    cmd = ["copilot", "-p", prompt, "--model", model, "--agent", "chat"]
+    cmd = ["copilot", "-p", prompt, "--model", model, "--allow-all", "--no-ask-user", "-s"]
     return _run(cmd, timeout, cwd)
 
 
@@ -42,7 +42,7 @@ def call_codex(prompt: str, model: str = None, timeout: int = 300, cwd: str = No
     config = get_provider_config("codex") or {}
     model = model or config.get("model", "gpt-5.4")
     timeout = config.get("timeout", timeout)
-    cmd = ["codex", "exec", prompt, "--model", model, "--full-auto", "--json"]
+    cmd = ["codex", "exec", prompt, "--model", model, "--full-auto", "--json", "--skip-git-repo-check"]
     return _run(cmd, timeout, cwd)
 
 
@@ -72,10 +72,12 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
         )
         duration = int((time.time() - start) * 1000)
 
-        if result.returncode != 0:
+        text = result.stdout.strip()
+
+        # If non-zero exit but stdout has content, prefer stdout (some CLIs emit warnings to stderr)
+        if result.returncode != 0 and not text:
             return CLIResult(text="", error=result.stderr.strip()[:500], duration_ms=duration)
 
-        text = result.stdout.strip()
         if not text:
             return CLIResult(text="", error="Empty response", duration_ms=duration)
 
