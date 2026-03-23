@@ -47,7 +47,14 @@ The "exclude" field is optional. Use it to skip specific models. If omitted, all
 {{"tool": "search_memory", "query": "search terms"}}
 ```
 
+5. **activate_agent** — Run a specialized agent for a specific task:
+```tool
+{{"tool": "activate_agent", "agent": "agent-name", "context": "optional extra context from user"}}
+```
+The "context" field is optional. It provides additional user context to the agent's predefined prompt.
+
 ## Available models: {available_models}
+{available_agents}
 
 ## How to behave:
 - When the user asks a question, decide if it needs one model or multiple
@@ -59,7 +66,8 @@ The "exclude" field is optional. Use it to skip specific models. If omitted, all
 - Speak in the same language as the user
 - Be concise and natural — you're a helpful conductor, not a bureaucrat
 - You can call multiple tools in sequence — first ask_all, then cross_send based on results
-- CRITICAL: When asking 2+ models, ALWAYS use ask_all (with exclude if needed). NEVER call ask_one multiple times — that runs sequentially and is very slow. ask_all runs in parallel.
+- CRITICAL: When asking 2+ models, ALWAYS use ask_all (with exclude if needed) or activate_agent. NEVER call ask_one multiple times — that runs sequentially and is very slow.
+- Prefer activate_agent when a specialized agent matches the user's request. Use ask_all/ask_one for ad-hoc questions that no agent covers.
 - IMPORTANT: Write your message to the user FIRST, then put tool calls at the END of your response
 - Only use ONE tool call per response. Do not put multiple tool blocks.
 - NEVER read files, browse directories, or use CLI tools yourself. You are the CONDUCTOR — you only delegate work to other models via ask_all/ask_one. The other models will read files and do the actual work."""
@@ -68,10 +76,12 @@ The "exclude" field is optional. Use it to skip specific models. If omitted, all
 class Conductor:
     """LLM-powered orchestrator that naturally manages multi-model interactions."""
 
-    def __init__(self, memory: Memory, session_id: str, cwd: Optional[str] = None):
+    def __init__(self, memory: Memory, session_id: str, cwd: Optional[str] = None, agents: dict = None, conductor_override=None):
         self.memory = memory
         self.session_id = session_id
         self.cwd = cwd
+        self.agents = agents or {}
+        self.conductor_override = conductor_override
         self.conductor_session_id: Optional[str] = None  # CLI session for conductor
 
     def _conductor_generate_standalone(self, prompt: str) -> LLMResponse:
@@ -256,7 +266,31 @@ TOPICS: <comma-separated keywords>"""
             model = self._get_model_for(name)
             model_list.append(f"- {name} ({display}, model: {model})")
 
-        prompt = CONDUCTOR_SYSTEM.format(available_models="\n".join(model_list))
+        # Build agent list section
+        agent_section = ""
+        if self.agents:
+            lines = ["## Available agents (use activate_agent to run them):"]
+            for agent in self.agents.values():
+                mode_info = f"mode: {agent.mode}"
+                if agent.mode == "debate":
+                    mode_info += f", {agent.rounds} rounds"
+                lines.append(f"- **{agent.name}**: {agent.description} ({mode_info})")
+            lines.append("\nPrefer activate_agent when a specialized agent matches. Use ask_all/ask_one for ad-hoc questions.")
+            agent_section = "\n".join(lines)
+
+        # Use conductor override or default system prompt
+        if self.conductor_override:
+            base_prompt = self.conductor_override.prompt_body
+            # Ensure tool definitions are present by appending model/agent info
+            base_prompt += f"\n\n## Available models:\n" + "\n".join(model_list)
+            if agent_section:
+                base_prompt += f"\n\n{agent_section}"
+            prompt = base_prompt
+        else:
+            prompt = CONDUCTOR_SYSTEM.format(
+                available_models="\n".join(model_list),
+                available_agents=agent_section,
+            )
 
         # Inject recent session summaries for cross-session awareness
         summaries = self.memory.get_recent_summaries(limit=5, exclude_session_id=self.session_id)
@@ -330,6 +364,11 @@ TOPICS: <comma-separated keywords>"""
         elif tool_name == "search_memory":
             query = tool_call.get("query", "")
             return self._tool_search_memory(query)
+
+        elif tool_name == "activate_agent":
+            agent_name = tool_call.get("agent", "")
+            context = tool_call.get("context", "")
+            return self._tool_activate_agent(agent_name, context)
 
         return f"Unknown tool: {tool_name}"
 
@@ -541,6 +580,19 @@ TOPICS: <comma-separated keywords>"""
         if not parts:
             return "No results found in memory."
         return "\n\n".join(parts)
+
+    def _tool_activate_agent(self, agent_name: str, context: str = "") -> str:
+        """Activate a specialized agent by name."""
+        agent = self.agents.get(agent_name)
+        if not agent:
+            available = ", ".join(self.agents.keys()) if self.agents else "none"
+            return f"Agent '{agent_name}' not found. Available agents: {available}"
+
+        console.print(f"[dim]  Activating agent: [bold]{agent.name}[/bold] (mode: {agent.mode})[/dim]")
+
+        from chorus.agents import AgentExecutor
+        executor = AgentExecutor(self)
+        return executor.execute(agent, context)
 
     def chat(self, user_message: str) -> str:
         """Main entry point — user sends message, conductor handles everything."""

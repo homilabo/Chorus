@@ -79,29 +79,37 @@ def _exit_session(conductor, memory, console_obj):
 def run_conductor(cwd: Optional[str] = None):
     """Conductor mode — an LLM orchestrates everything naturally."""
     from chorus.conductor import Conductor
+    from chorus.agents import load_agents, load_conductor_override, ensure_default_agents
 
     ensure_config()
     load_config()
     init_providers()
+    ensure_default_agents()
 
     available = get_available_providers()
     if not available:
         console.print("[red]No providers available. Install at least one CLI tool (claude, gemini, copilot, codex).[/red]")
         sys.exit(1)
 
+    # Load agents and conductor override
+    agents = load_agents(cwd=cwd)
+    conductor_override = load_conductor_override(cwd=cwd)
+
     memory = Memory()
     session = memory.create_session()
-    conductor = Conductor(memory, session.id, cwd=cwd)
+    conductor = Conductor(memory, session.id, cwd=cwd, agents=agents, conductor_override=conductor_override)
 
     provider_names = ", ".join(f"[bold]{conductor._get_display_name(n)}[/bold]" for n in available)
+    agent_names = ", ".join(agents.keys()) if agents else "none"
     cwd_display = cwd or "."
     console.print(Panel(
         f"[bold]Chorus v0.1.0[/bold] — Multi-LLM Deliberation\n"
         f"[blue]Conductor mode[/blue] — just talk naturally\n"
-        f"Available models: {provider_names}\n"
+        f"Models: {provider_names}\n"
+        f"Agents: {agent_names}\n"
         f"Working dir: {cwd_display}\n"
         f"Session: {session.id}\n"
-        f"Type [cyan]/quit[/cyan] to exit, [cyan]/memory[/cyan] to search past conversations",
+        f"Type [cyan]/quit[/cyan] to exit, [cyan]/agents[/cyan] to list agents",
         border_style="blue",
     ))
 
@@ -149,6 +157,24 @@ def run_conductor(cwd: Optional[str] = None):
             table.add_column("Updated")
             for s in sessions:
                 table.add_row(s["id"], s["title"], s["updated_at"][:16])
+            console.print(table)
+            continue
+
+        if user_input == "/agents":
+            if not agents:
+                console.print("[dim]No agents loaded.[/dim]")
+                continue
+            table = Table(title="Available Agents")
+            table.add_column("Name", style="bold")
+            table.add_column("Description")
+            table.add_column("Mode")
+            table.add_column("Source")
+            for agent in agents.values():
+                source = "project" if "chorus-agents" in agent.source_path else "global"
+                mode = agent.mode
+                if agent.mode == "debate":
+                    mode += f" ({agent.rounds}r)"
+                table.add_row(agent.name, agent.description, mode, source)
             console.print(table)
             continue
 
