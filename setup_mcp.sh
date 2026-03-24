@@ -18,7 +18,7 @@ if [ ! -f "$PYTHON" ]; then
 fi
 
 echo "Installing dependencies..."
-"$PYTHON" -m pip install --quiet pyyaml mcp 2>&1 | tail -1
+"$PYTHON" -m pip install --quiet -e "$DIR" 2>&1 | tail -1
 
 REGISTERED=0
 
@@ -86,13 +86,13 @@ if command -v copilot &>/dev/null; then
 import json
 with open('$COPILOT_MCP') as f:
     config = json.load(f)
-config.setdefault('servers', {})
-config['servers']['chorus'] = {'type': 'stdio', 'command': '$PYTHON', 'args': ['$SERVER']}
+config.setdefault('mcpServers', {})
+config['mcpServers']['chorus'] = {'type': 'stdio', 'command': '$PYTHON', 'args': ['$SERVER']}
 with open('$COPILOT_MCP', 'w') as f:
     json.dump(config, f, indent=2)
 "
     else
-        echo "{\"servers\":{\"chorus\":{\"type\":\"stdio\",\"command\":\"$PYTHON\",\"args\":[\"$SERVER\"]}}}" | "$PYTHON" -m json.tool > "$COPILOT_MCP"
+        echo "{\"mcpServers\":{\"chorus\":{\"type\":\"stdio\",\"command\":\"$PYTHON\",\"args\":[\"$SERVER\"]}}}" | "$PYTHON" -m json.tool > "$COPILOT_MCP"
     fi
     echo "  ✓ registered"
     REGISTERED=$((REGISTERED + 1))
