@@ -12,8 +12,6 @@ Model tools:
 - ask: Ask a specific model (provider: gemini, copilot, codex, claude)
 - ask_all: Ask all models in parallel — use for comparisons, research, multiple perspectives
 - parallel_ask: Run multiple calls (same or different providers) simultaneously
-- debate: Multi-round debate between models
-- cross_send: Send one model's response to another for critique
 
 Memory tools:
 - search_memory: Search past conversations
@@ -25,6 +23,8 @@ Guidelines:
 - Match the user's language
 - For simple questions, answer directly without calling models
 - For comparisons, debates, research — use ask_all for multiple perspectives
+- For debates: call ask_all for round 1, then ask_all again with previous responses as context for round 2+
+- For critique/cross-review: use ask to send one model's response to another
 - Tell the user what you're about to do before calling tools
 - Synthesize results by highlighting agreements, disagreements, and insights
 - Be natural and conversational""",
@@ -150,83 +150,6 @@ async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
             parts.append(f"{label} ({result.duration_ms}ms):\n{result.text}")
 
     return "\n\n---\n\n".join(parts)
-
-
-@mcp.tool()
-async def debate(prompt: str, rounds: int = 2, exclude: list[str] = None, cwd: str = ".") -> str:
-    """Run a multi-round debate between models on a topic.
-
-    Each round, all models see the previous round's responses and can agree, disagree, or refine.
-
-    Args:
-        prompt: The debate topic
-        rounds: Number of rounds (default 2)
-        exclude: Models to skip
-        cwd: Working directory for file operations
-    """
-    all_rounds = []
-
-    first = await ask_all(prompt, exclude, cwd)
-    all_rounds.append(f"**Round 1:**\n{first}")
-
-    prev = first
-    for r in range(1, rounds):
-        debate_prompt = f"""This is round {r + 1} of a multi-model debate.
-
-Topic: {prompt}
-
-Previous round responses:
-{prev}
-
-Respond again. Consider what other models said. Where do you agree? Disagree? Be specific and constructive."""
-
-        round_result = await ask_all(debate_prompt, exclude, cwd)
-        all_rounds.append(f"**Round {r + 1}:**\n{round_result}")
-        prev = round_result
-
-    return "\n\n===\n\n".join(all_rounds)
-
-
-@mcp.tool()
-async def cross_send(from_model: str, to_model: str, context: str = "", cwd: str = ".") -> str:
-    """Send one model's response to another model for critique or follow-up.
-
-    Useful for peer review, fact-checking, or getting a second opinion.
-
-    Args:
-        from_model: Source model name (gemini, copilot, codex, claude)
-        to_model: Target model name
-        context: Additional context or specific question for the target model
-        cwd: Working directory for file operations
-    """
-    from_fn = _get_provider_fn(from_model)
-    to_fn = _get_provider_fn(to_model)
-
-    if not from_fn:
-        return f"Unknown model: {from_model}. Available: {', '.join(AVAILABLE_PROVIDERS)}"
-    if not to_fn:
-        return f"Unknown model: {to_model}. Available: {', '.join(AVAILABLE_PROVIDERS)}"
-
-    loop = asyncio.get_event_loop()
-
-    source_result = await loop.run_in_executor(
-        None, lambda: from_fn(context or "Share your analysis", cwd=cwd))
-
-    if source_result.error:
-        return f"[{from_model} ERROR] {source_result.error}"
-
-    cross_prompt = f"""{from_model.upper()} said:
-{source_result.text}
-
-{context or 'Review the above. What is good? What is wrong or missing? Provide your critique.'}"""
-
-    target_result = await loop.run_in_executor(
-        None, lambda: to_fn(cross_prompt, cwd=cwd))
-
-    if target_result.error:
-        return f"[{to_model} ERROR] {target_result.error}"
-
-    return f"**{from_model.upper()}:**\n{source_result.text}\n\n---\n\n**{to_model.upper()} (critique):**\n{target_result.text}"
 
 
 # ─── Memory tools ───
