@@ -2,57 +2,62 @@
 
 **Your AI models, working together.**
 
-Chorus connects your CLI subscriptions (Claude, Gemini, Copilot, Codex) into a unified multi-model system via MCP (Model Context Protocol). No API keys needed — just your existing $20/month subscriptions.
+Chorus connects your CLI subscriptions (Claude, Gemini, Copilot, Codex) into a unified multi-model system via [MCP](https://modelcontextprotocol.io). No API keys needed — just your existing ~$20/month subscriptions.
 
 ## How It Works
 
-Chorus runs as a single MCP server that any compatible AI CLI can use as a conductor:
+Chorus runs as a single MCP server. Whichever CLI you open becomes the conductor — the others become tools it can call:
 
 ```
-You ↔ Claude Code (conductor) → ask_gemini(), ask_codex(), ask_copilot()
-You ↔ Gemini CLI (conductor) → ask_claude(), ask_codex(), ask_copilot()
+You ↔ Claude Code (conductor) → ask(gemini), ask(codex), ask(copilot)
+You ↔ Gemini CLI  (conductor) → ask(claude), ask(codex), ask(copilot)
+You ↔ Copilot CLI (conductor) → ask(claude), ask(gemini), ask(codex)
+You ↔ Codex CLI   (conductor) → ask(claude), ask(gemini), ask(copilot)
 ```
 
-Whichever CLI you open becomes the conductor. The others become tools it can call.
+## Tools
 
-## Available Tools
-
-| Tool | Description |
+| Tool | What it does |
 |------|-------------|
-| `ask_gemini` | Ask Google Gemini (internet research, analysis) |
-| `ask_copilot` | Ask GitHub Copilot (code tasks) |
-| `ask_codex` | Ask OpenAI Codex (code generation, analysis) |
-| `ask_claude` | Ask Claude (reasoning, coding) |
-| `ask_all` | Ask all models in parallel |
-| `debate` | Multi-round debate between models |
-| `cross_send` | Send one model's response to another for critique |
-| `search_memory` | Search past conversations (FTS5) |
-| `save_to_memory` | Save content for future retrieval |
-| `save_session_summary` | Save session summary with key topics |
+| `ask` | Ask a specific model (provider: gemini, copilot, codex, claude) |
+| `ask_all` | Ask all models the same question in parallel |
+| `parallel_ask` | Run multiple calls (same or different providers) simultaneously |
+
+The conductor handles everything else — debates, critiques, research synthesis — using these 3 tools with its own intelligence.
 
 ## Setup
 
-```bash
-# 1. Install dependencies
-cd Chorus && python -m venv .venv && source .venv/bin/activate
-pip install -e .
+**Requirements:** Python 3.10+ and at least one CLI subscription.
 
-# 2. Register MCP server with all CLI providers
+```bash
+# 1. Clone
+git clone https://github.com/willynikes/chorus.git
+cd chorus
+
+# 2. Install dependencies
+python3 -m venv .venv
+source .venv/bin/activate
+pip install pyyaml mcp
+
+# 3. Register MCP server (auto-detects installed CLIs)
 ./setup_mcp.sh
 
-# 3. Open any CLI and start talking
+# 4. Open any CLI
 claude   # or: gemini, copilot, codex
 ```
 
+That's it. The conductor will automatically discover Chorus tools.
+
 ## Configuration
 
-Edit `~/.chorus/config.yaml` to set models and timeouts:
+Models and timeouts are configured in `~/.chorus/config.yaml` (created on first run):
 
 ```yaml
 providers:
   claude:
     model: sonnet
     timeout: 300
+    max_turns: 10
   gemini:
     model: gemini-2.5-pro
     timeout: 300
@@ -64,20 +69,39 @@ providers:
     timeout: 300
 ```
 
-## Project Integration
+## Example Usage
 
-Copy `CLAUDE.md` to any project directory to give the conductor behavior guidelines (when to delegate, how to synthesize results).
+```
+You:    Compare Ruby and Python, ask all models
+Claude: [calls ask_all] → 4 models respond in parallel → synthesizes results
+
+You:    Ask Gemini to research DMK Karavan
+Claude: [calls ask(provider="gemini")] → returns Gemini's research
+
+You:    Now send that to Codex for critique
+Claude: [calls ask(provider="codex", prompt="Gemini said: ... critique this")]
+
+You:    Run a 2-round debate on REST vs GraphQL
+Claude: [calls ask_all round 1] → [calls ask_all round 2 with previous context] → synthesizes
+```
 
 ## Architecture
 
 ```
 chorus/
-├── cli.py                 # CLI provider call functions
-├── config.py              # Provider configuration
-├── memory.py              # SQLite + FTS5 persistent memory
-├── models.py              # Data models
-└── mcp_servers/
-    └── chorus_server.py   # Single MCP server, 12 tools
+├── chorus_server.py    # MCP server — 3 tools
+├── cli.py              # CLI provider call functions
+├── config.py           # Provider config (~/.chorus/config.yaml)
+├── setup_mcp.sh        # Auto-register with installed CLIs
+└── README.md
 ```
 
-~700 lines of Python. No frameworks, no API keys.
+~350 lines of Python. No frameworks, no API keys.
+
+## How It's Different
+
+- **No API costs** — uses CLI subscriptions you already pay for
+- **Any conductor** — Claude, Gemini, Copilot, or Codex can orchestrate
+- **Parallel execution** — `ask_all` runs all models simultaneously
+- **Session continuity** — models remember context within a session
+- **3 files** — no bloat, easy to understand and modify
