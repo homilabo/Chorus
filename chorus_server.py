@@ -1,22 +1,8 @@
 """Chorus MCP server — multi-model orchestration via CLI subscriptions."""
 
 import asyncio
-import os
 
 from mcp.server.fastmcp import FastMCP
-
-
-def _detect_conductor() -> str | None:
-    """Detect which CLI is the conductor (host) to prevent recursive calls."""
-    if os.environ.get("CLAUDECODE"):
-        return "claude"
-    if os.environ.get("GEMINI_CLI_IDE_SERVER_PORT") or os.environ.get("GEMINI_CLI"):
-        return "gemini"
-    if os.environ.get("CODEX_CLI") or os.environ.get("CODEX"):
-        return "codex"
-    if os.environ.get("COPILOT_CLI") or "copilotCli" in os.environ.get("PATH", ""):
-        return "copilot"
-    return None
 
 
 def _build_instructions() -> str:
@@ -59,7 +45,6 @@ def _build_instructions() -> str:
     return "\n".join(lines)
 
 
-CONDUCTOR = _detect_conductor()
 AVAILABLE_PROVIDERS = ["gemini", "copilot", "codex", "claude"]
 
 mcp = FastMCP("chorus", instructions=_build_instructions())
@@ -81,7 +66,7 @@ def _resolve_role(role: str) -> tuple[str, str | None]:
     from config import get_role
     role_cfg = get_role(role)
     if not role_cfg:
-        return role, None  # treat as provider name fallback
+        return role, None
     return role_cfg.get("provider", "gemini"), role_cfg.get("model")
 
 
@@ -102,15 +87,11 @@ async def ask(prompt: str, provider: str = "", role: str = "", cwd: str = ".") -
         provider: Direct provider name (use role instead when possible)
         cwd: Working directory for file operations
     """
-    # Resolve: role takes priority over provider
     model_override = None
     if role:
         provider, model_override = _resolve_role(role)
     elif not provider:
-        provider = "gemini"  # default
-
-    if provider == CONDUCTOR:
-        return f"[BLOCKED] {provider} is the current conductor — cannot call itself."
+        provider = "gemini"
 
     fn = _get_provider_fn(provider)
     if not fn:
@@ -140,8 +121,6 @@ async def ask_all(prompt: str, exclude: list[str] = None, cwd: str = ".") -> str
         cwd: Working directory for file operations
     """
     exclude = exclude or []
-    if CONDUCTOR and CONDUCTOR not in exclude:
-        exclude.append(CONDUCTOR)
     active = {name: _get_provider_fn(name) for name in AVAILABLE_PROVIDERS if name not in exclude}
 
     if not active:
@@ -194,8 +173,6 @@ async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
         elif not provider:
             provider = "gemini"
 
-        if provider == CONDUCTOR:
-            return idx, provider, None, f"{provider} is the conductor — cannot call itself"
         fn = _get_provider_fn(provider)
         if not fn:
             return idx, provider, None, f"Unknown provider: {provider}"
