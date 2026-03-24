@@ -55,13 +55,14 @@ def call_copilot(prompt: str, model: str = None, timeout: int = 300, cwd: str = 
     config = get_provider_config("copilot") or {}
     model = model or config.get("model", "gpt-5-mini")
     timeout = config.get("timeout", timeout)
-    cmd = ["copilot", "-p", prompt, "--model", model, "--allow-all", "--no-ask-user", "-s"]
+    cmd = ["copilot", "-p", prompt, "--model", model, "--allow-all", "--no-ask-user", "--output-format", "json"]
     session_id = get_session("copilot")
     if session_id:
-        cmd.extend(["--resume", session_id])
+        cmd.append("--continue")  # Copilot uses --continue (resumes last session), not --resume <id>
     result = _run(cmd, timeout, cwd)
-    if result.session_id:
-        set_session("copilot", result.session_id)
+    # Mark that a session exists (Copilot doesn't return session_id, but --continue resumes last)
+    if not result.error:
+        set_session("copilot", "active")
     return result
 
 
@@ -131,7 +132,7 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
             if parsed:
                 text = str(parsed)
         except json.JSONDecodeError:
-            # Try JSONL (Codex outputs newline-delimited JSON events)
+            # Try JSONL (Codex and Copilot output newline-delimited JSON events)
             last_text = None
             last_error = None
             for line in text.split('\n'):
@@ -141,14 +142,23 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
                 try:
                     event = json.loads(line)
                     etype = event.get("type", "")
+                    data = event.get("data", event.get("item", {}))
+                    # Codex: item.completed
                     if etype == "item.completed":
-                        item_text = event.get("item", {}).get("text", "")
+                        item_text = data.get("text", "")
                         if item_text:
                             last_text = item_text
+                    # Copilot: assistant.message
+                    elif etype == "assistant.message":
+                        msg_text = data.get("content", "")
+                        if msg_text:
+                            last_text = msg_text
+                    # Codex: thread.started (session ID)
                     elif etype == "thread.started":
                         session_id = event.get("thread_id") or event.get("session_id")
+                    # Errors
                     elif etype in ("error", "turn.failed"):
-                        last_error = event.get("message", event.get("error", {}).get("message", ""))
+                        last_error = event.get("message", data.get("message", ""))
                 except json.JSONDecodeError:
                     continue
             if last_text:
