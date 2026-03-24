@@ -1,4 +1,4 @@
-"""Chorus MCP server — all tools in a single server."""
+"""Chorus MCP server — multi-model orchestration via CLI subscriptions."""
 
 import asyncio
 
@@ -6,97 +6,63 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("chorus")
 
-
-# ─── Individual model tools ───
-# Model defaults come from ~/.chorus/config.yaml, not from these signatures.
-
-@mcp.tool()
-async def ask_gemini(prompt: str, cwd: str = ".") -> str:
-    """Ask Google Gemini a question. Gemini can search the internet and do research.
-
-    Args:
-        prompt: The question or instruction to send to Gemini
-        cwd: Working directory for file operations
-    """
-    from chorus.cli import call_gemini
-    result = call_gemini(prompt, cwd=cwd)
-    if result.error:
-        return f"[Gemini ERROR] {result.error}"
-    return result.text
+AVAILABLE_PROVIDERS = ["gemini", "copilot", "codex", "claude"]
 
 
-@mcp.tool()
-async def ask_copilot(prompt: str, cwd: str = ".") -> str:
-    """Ask GitHub Copilot a question. Good for code-related tasks.
-
-    Args:
-        prompt: The question or instruction to send to Copilot
-        cwd: Working directory for file operations
-    """
-    from chorus.cli import call_copilot
-    result = call_copilot(prompt, cwd=cwd)
-    if result.error:
-        return f"[Copilot ERROR] {result.error}"
-    return result.text
-
-
-@mcp.tool()
-async def ask_codex(prompt: str, cwd: str = ".") -> str:
-    """Ask OpenAI Codex a question. Strong at code generation and analysis.
-
-    Args:
-        prompt: The question or instruction to send to Codex
-        cwd: Working directory for file operations
-    """
-    from chorus.cli import call_codex
-    result = call_codex(prompt, cwd=cwd)
-    if result.error:
-        return f"[Codex ERROR] {result.error}"
-    return result.text
-
-
-@mcp.tool()
-async def ask_claude(prompt: str, cwd: str = ".") -> str:
-    """Ask Claude a question. Strong at reasoning, analysis, and coding.
-    Use this when another model (e.g. Gemini) is the conductor.
-
-    Args:
-        prompt: The question or instruction to send to Claude
-        cwd: Working directory for file operations
-    """
-    from chorus.cli import call_claude
-    result = call_claude(prompt, cwd=cwd)
-    if result.error:
-        return f"[Claude ERROR] {result.error}"
-    return result.text
-
-
-# ─── Orchestration tools ───
-
-def _get_providers():
+def _get_provider_fn(name: str):
+    """Get the CLI call function for a provider."""
     from chorus.cli import call_gemini, call_copilot, call_codex, call_claude
     return {
         "gemini": call_gemini,
         "copilot": call_copilot,
         "codex": call_codex,
         "claude": call_claude,
-    }
+    }.get(name)
+
+
+# ─── Core tools ───
+
+@mcp.tool()
+async def ask(prompt: str, provider: str = "gemini", cwd: str = ".") -> str:
+    """Ask a specific AI model a question.
+
+    Available providers: gemini, copilot, codex, claude.
+    - gemini: Google Gemini — internet research, analysis
+    - copilot: GitHub Copilot — code tasks
+    - codex: OpenAI Codex — code generation, analysis
+    - claude: Claude — reasoning, coding (use when another model is conductor)
+
+    Args:
+        prompt: The question or instruction
+        provider: Which model to ask (gemini, copilot, codex, claude)
+        cwd: Working directory for file operations
+    """
+    fn = _get_provider_fn(provider)
+    if not fn:
+        return f"Unknown provider: {provider}. Available: {', '.join(AVAILABLE_PROVIDERS)}"
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: fn(prompt, cwd=cwd))
+
+    if result.error:
+        return f"[{provider.upper()} ERROR] {result.error}"
+    return result.text
 
 
 @mcp.tool()
 async def ask_all(prompt: str, exclude: list[str] = None, cwd: str = ".") -> str:
     """Ask ALL available models the same question in parallel and return all responses.
 
-    Use this for comparisons, research, or getting multiple perspectives on a topic.
+    Use this for comparisons, research, or getting multiple perspectives.
+    All models run simultaneously — total time equals the slowest model.
 
     Args:
         prompt: The question to ask all models
         exclude: Models to skip (e.g. ["copilot", "claude"])
         cwd: Working directory for file operations
     """
-    providers = _get_providers()
     exclude = exclude or []
-    active = {k: v for k, v in providers.items() if k not in exclude}
+    active = {name: _get_provider_fn(name) for name in AVAILABLE_PROVIDERS if name not in exclude}
 
     if not active:
         return "No providers available."
@@ -167,17 +133,18 @@ async def cross_send(from_model: str, to_model: str, context: str = "", cwd: str
         context: Additional context or specific question for the target model
         cwd: Working directory for file operations
     """
-    providers = _get_providers()
+    from_fn = _get_provider_fn(from_model)
+    to_fn = _get_provider_fn(to_model)
 
-    if from_model not in providers:
-        return f"Unknown model: {from_model}. Available: {', '.join(providers.keys())}"
-    if to_model not in providers:
-        return f"Unknown model: {to_model}. Available: {', '.join(providers.keys())}"
+    if not from_fn:
+        return f"Unknown model: {from_model}. Available: {', '.join(AVAILABLE_PROVIDERS)}"
+    if not to_fn:
+        return f"Unknown model: {to_model}. Available: {', '.join(AVAILABLE_PROVIDERS)}"
 
     loop = asyncio.get_event_loop()
 
     source_result = await loop.run_in_executor(
-        None, lambda: providers[from_model](context or "Share your analysis", cwd=cwd))
+        None, lambda: from_fn(context or "Share your analysis", cwd=cwd))
 
     if source_result.error:
         return f"[{from_model} ERROR] {source_result.error}"
@@ -188,7 +155,7 @@ async def cross_send(from_model: str, to_model: str, context: str = "", cwd: str
 {context or 'Review the above. What is good? What is wrong or missing? Provide your critique.'}"""
 
     target_result = await loop.run_in_executor(
-        None, lambda: providers[to_model](cross_prompt, cwd=cwd))
+        None, lambda: to_fn(cross_prompt, cwd=cwd))
 
     if target_result.error:
         return f"[{to_model} ERROR] {target_result.error}"
@@ -241,7 +208,7 @@ async def save_session_summary(summary: str, topics: str = "") -> str:
 
     Args:
         summary: 2-3 sentence summary of what was discussed
-        topics: Comma-separated key topics (e.g. "karavan, DMK, fiyat")
+        topics: Comma-separated key topics (e.g. "karavan, DMK, price")
     """
     memory = _get_memory()
     session_id = _ensure_session()
@@ -269,26 +236,6 @@ async def search_memory(query: str, limit: int = 10) -> str:
         content = r["content"][:300]
         parts.append(f"[{provider}] {timestamp}:\n{content}")
     return "\n\n---\n\n".join(parts)
-
-
-@mcp.tool()
-async def get_recent_sessions(limit: int = 5) -> str:
-    """List recent conversation sessions.
-
-    Args:
-        limit: Number of sessions to return
-    """
-    memory = _get_memory()
-    sessions = memory.list_sessions(limit)
-    if not sessions:
-        return "No sessions yet."
-    parts = []
-    for s in sessions:
-        sid = s["id"][:8]
-        title = s.get("title", "Untitled")
-        updated = s["updated_at"][:16]
-        parts.append(f"{sid} | {title} | {updated}")
-    return "\n".join(parts)
 
 
 @mcp.tool()
