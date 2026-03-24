@@ -19,7 +19,7 @@ fi
 
 echo "Installing dependencies..."
 "$PYTHON" -m pip install --quiet --upgrade pip 2>&1 | tail -1
-"$PYTHON" -m pip install --quiet -e "$DIR" 2>&1 | tail -3
+"$PYTHON" -m pip install --quiet "$DIR" 2>&1 | tail -3
 
 REGISTERED=0
 
