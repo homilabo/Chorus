@@ -89,6 +89,8 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
                 text = str(parsed)
         except json.JSONDecodeError:
             # Try JSONL (Codex outputs newline-delimited JSON events)
+            # Take the LAST item.completed — earlier ones may be intermediate thoughts
+            last_text = None
             for line in text.split('\n'):
                 line = line.strip()
                 if not line:
@@ -98,10 +100,11 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
                     if event.get("type") == "item.completed":
                         item_text = event.get("item", {}).get("text", "")
                         if item_text:
-                            text = item_text
-                            break
+                            last_text = item_text
                 except json.JSONDecodeError:
                     continue
+            if last_text:
+                text = last_text
 
         return CLIResult(text=text, duration_ms=duration)
 
