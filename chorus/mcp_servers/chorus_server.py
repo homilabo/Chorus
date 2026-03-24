@@ -4,7 +4,31 @@ import asyncio
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("chorus")
+mcp = FastMCP(
+    "chorus",
+    instructions="""You have access to multiple AI models via Chorus tools.
+
+Model tools:
+- ask: Ask a specific model (provider: gemini, copilot, codex, claude)
+- ask_all: Ask all models in parallel — use for comparisons, research, multiple perspectives
+- parallel_ask: Run multiple calls (same or different providers) simultaneously
+- debate: Multi-round debate between models
+- cross_send: Send one model's response to another for critique
+
+Memory tools:
+- search_memory: Search past conversations
+- save_to_memory: Save important content for future retrieval
+- save_session_summary: Save session summary at end of discussion
+- search_summaries: Search session summaries
+
+Guidelines:
+- Match the user's language
+- For simple questions, answer directly without calling models
+- For comparisons, debates, research — use ask_all for multiple perspectives
+- Tell the user what you're about to do before calling tools
+- Synthesize results by highlighting agreements, disagreements, and insights
+- Be natural and conversational""",
+)
 
 AVAILABLE_PROVIDERS = ["gemini", "copilot", "codex", "claude"]
 
