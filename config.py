@@ -1,4 +1,4 @@
-"""Configuration — loads provider settings from ~/.chorus/config.yaml."""
+"""Configuration — loads provider and role settings from ~/.chorus/config.yaml."""
 
 import logging
 from pathlib import Path
@@ -16,6 +16,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "gemini": {"model": "gemini-2.5-pro", "timeout": 300},
         "copilot": {"model": "gpt-5-mini", "timeout": 300},
         "codex": {"model": "gpt-5.4", "timeout": 300},
+    },
+    "roles": {
+        "researcher": {"provider": "gemini", "model": "gemini-2.5-pro", "description": "Deep internet research, large context analysis"},
+        "coder": {"provider": "codex", "model": "gpt-5.4", "description": "Code generation, complex logic, refactoring"},
+        "reasoner": {"provider": "claude", "model": "opus", "description": "Complex reasoning, architecture, analysis"},
+        "reviewer": {"provider": "copilot", "model": "gpt-5-mini", "description": "Quick code review, best practices"},
     },
 }
 
@@ -46,6 +52,14 @@ def get_config() -> dict[str, Any]:
 
 def get_provider_config(provider_key: str) -> Optional[dict[str, Any]]:
     return get_config().get("providers", {}).get(provider_key)
+
+
+def get_roles() -> dict[str, dict]:
+    return get_config().get("roles", {})
+
+
+def get_role(role_name: str) -> Optional[dict[str, Any]]:
+    return get_roles().get(role_name)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:

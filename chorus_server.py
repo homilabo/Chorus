@@ -19,29 +19,50 @@ def _detect_conductor() -> str | None:
     return None
 
 
+def _build_instructions() -> str:
+    """Build MCP instructions with roles from config."""
+    from config import get_roles
+    roles = get_roles()
+
+    lines = [
+        "You have access to multiple AI models via Chorus tools.",
+        "",
+        "Model tools:",
+        "- ask: Ask a specific model by provider name OR by role",
+        "- ask_all: Ask all models in parallel — use for comparisons, research, multiple perspectives",
+        "- parallel_ask: Run multiple calls (same or different providers) simultaneously",
+    ]
+
+    if roles:
+        lines.append("")
+        lines.append("Available roles (use with ask tool's role parameter):")
+        for name, cfg in roles.items():
+            provider = cfg.get("provider", "?")
+            model = cfg.get("model", "default")
+            desc = cfg.get("description", "")
+            lines.append(f"- {name}: {desc} (→ {provider}/{model})")
+
+    lines.extend([
+        "",
+        "Guidelines:",
+        "- Match the user's language",
+        "- For simple questions, answer directly without calling models",
+        "- For comparisons, debates, research — use ask_all for multiple perspectives",
+        "- Use roles to pick the right model for the task (e.g. role='researcher' for research)",
+        "- For debates: call ask_all for round 1, then ask_all again with previous responses as context",
+        "- For critique: use ask to send one model's response to another",
+        "- Tell the user what you're about to do before calling tools",
+        "- Synthesize results by highlighting agreements, disagreements, and insights",
+        "- Be natural and conversational",
+    ])
+
+    return "\n".join(lines)
+
+
 CONDUCTOR = _detect_conductor()
-
-mcp = FastMCP(
-    "chorus",
-    instructions="""You have access to multiple AI models via Chorus tools.
-
-Model tools:
-- ask: Ask a specific model (provider: gemini, copilot, codex, claude)
-- ask_all: Ask all models in parallel — use for comparisons, research, multiple perspectives
-- parallel_ask: Run multiple calls (same or different providers) simultaneously
-
-Guidelines:
-- Match the user's language
-- For simple questions, answer directly without calling models
-- For comparisons, debates, research — use ask_all for multiple perspectives
-- For debates: call ask_all for round 1, then ask_all again with previous responses as context for round 2+
-- For critique/cross-review: use ask to send one model's response to another
-- Tell the user what you're about to do before calling tools
-- Synthesize results by highlighting agreements, disagreements, and insights
-- Be natural and conversational""",
-)
-
 AVAILABLE_PROVIDERS = ["gemini", "copilot", "codex", "claude"]
+
+mcp = FastMCP("chorus", instructions=_build_instructions())
 
 
 def _get_provider_fn(name: str):
@@ -55,30 +76,51 @@ def _get_provider_fn(name: str):
     }.get(name)
 
 
-@mcp.tool()
-async def ask(prompt: str, provider: str = "gemini", cwd: str = ".") -> str:
-    """Ask a specific AI model a question.
+def _resolve_role(role: str) -> tuple[str, str | None]:
+    """Resolve a role name to (provider, model). Returns (provider, model_override)."""
+    from config import get_role
+    role_cfg = get_role(role)
+    if not role_cfg:
+        return role, None  # treat as provider name fallback
+    return role_cfg.get("provider", "gemini"), role_cfg.get("model")
 
-    Available providers: gemini, copilot, codex, claude.
-    - gemini: Google Gemini — internet research, analysis
-    - copilot: GitHub Copilot — code tasks
-    - codex: OpenAI Codex — code generation, analysis
-    - claude: Claude — reasoning, coding (use when another model is conductor)
+
+# ─── Tools ───
+
+@mcp.tool()
+async def ask(prompt: str, provider: str = "", role: str = "", cwd: str = ".") -> str:
+    """Ask a specific AI model a question, either by provider name or by role.
+
+    By role (recommended): role="researcher", role="coder", role="reasoner", role="reviewer"
+    By provider: provider="gemini", provider="copilot", provider="codex", provider="claude"
+
+    Roles map to the best provider+model for that task (configured in ~/.chorus/config.yaml).
 
     Args:
         prompt: The question or instruction
-        provider: Which model to ask (gemini, copilot, codex, claude)
+        role: Task role — routes to the best provider+model automatically
+        provider: Direct provider name (use role instead when possible)
         cwd: Working directory for file operations
     """
+    # Resolve: role takes priority over provider
+    model_override = None
+    if role:
+        provider, model_override = _resolve_role(role)
+    elif not provider:
+        provider = "gemini"  # default
+
     if provider == CONDUCTOR:
-        return f"[BLOCKED] {provider} is the current conductor — cannot call itself. Use a different provider."
+        return f"[BLOCKED] {provider} is the current conductor — cannot call itself."
 
     fn = _get_provider_fn(provider)
     if not fn:
         return f"Unknown provider: {provider}. Available: {', '.join(AVAILABLE_PROVIDERS)}"
 
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, lambda: fn(prompt, cwd=cwd))
+    if model_override:
+        result = await loop.run_in_executor(None, lambda: fn(prompt, model=model_override, cwd=cwd))
+    else:
+        result = await loop.run_in_executor(None, lambda: fn(prompt, cwd=cwd))
 
     if result.error:
         return f"[{provider.upper()} ERROR] {result.error}"
@@ -98,7 +140,6 @@ async def ask_all(prompt: str, exclude: list[str] = None, cwd: str = ".") -> str
         cwd: Working directory for file operations
     """
     exclude = exclude or []
-    # Auto-exclude conductor to prevent recursive calls
     if CONDUCTOR and CONDUCTOR not in exclude:
         exclude.append(CONDUCTOR)
     active = {name: _get_provider_fn(name) for name in AVAILABLE_PROVIDERS if name not in exclude}
@@ -127,14 +168,14 @@ async def ask_all(prompt: str, exclude: list[str] = None, cwd: str = ".") -> str
 
 @mcp.tool()
 async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
-    """Run multiple ask calls in parallel. Each task specifies a provider and prompt.
+    """Run multiple ask calls in parallel. Each task specifies a provider/role and prompt.
 
     Use this when you need to call the same or different providers multiple times simultaneously.
     All tasks run at the same time — total time equals the slowest task.
 
     Args:
-        tasks: List of objects with "provider" and "prompt" keys.
-               Example: [{"provider": "copilot", "prompt": "question 1"}, {"provider": "gemini", "prompt": "question 2"}]
+        tasks: List of objects with "prompt" and either "provider" or "role" keys.
+               Example: [{"role": "coder", "prompt": "question 1"}, {"provider": "copilot", "prompt": "question 2"}]
         cwd: Working directory for file operations
     """
     if not tasks:
@@ -143,14 +184,26 @@ async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
     loop = asyncio.get_event_loop()
 
     async def _call(idx, task):
-        provider = task.get("provider", "gemini")
         prompt = task.get("prompt", "")
+        role = task.get("role", "")
+        provider = task.get("provider", "")
+        model_override = None
+
+        if role:
+            provider, model_override = _resolve_role(role)
+        elif not provider:
+            provider = "gemini"
+
         if provider == CONDUCTOR:
             return idx, provider, None, f"{provider} is the conductor — cannot call itself"
         fn = _get_provider_fn(provider)
         if not fn:
             return idx, provider, None, f"Unknown provider: {provider}"
-        result = await loop.run_in_executor(None, lambda: fn(prompt, cwd=cwd))
+
+        if model_override:
+            result = await loop.run_in_executor(None, lambda: fn(prompt, model=model_override, cwd=cwd))
+        else:
+            result = await loop.run_in_executor(None, lambda: fn(prompt, cwd=cwd))
         return idx, provider, result, None
 
     jobs = [_call(i, t) for i, t in enumerate(tasks)]
