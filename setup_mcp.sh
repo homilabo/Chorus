@@ -2,7 +2,7 @@
 # Register Chorus MCP server with all supported CLI providers
 DIR="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${DIR}/.venv/bin/python"
-SERVER="$DIR/chorus/mcp_servers/chorus_server.py"
+SERVER="$DIR/chorus_server.py"
 
 # ─── Claude Code ───
 echo "=== Claude Code ==="
@@ -66,8 +66,4 @@ fi
 
 echo ""
 echo "Done! One server registered with all 4 CLI providers."
-echo ""
-echo "Tools: ask_gemini, ask_copilot, ask_codex, ask_claude"
-echo "       ask_all, debate, cross_send"
-echo "       search_memory, save_to_memory, save_session_summary"
-echo "       get_recent_sessions, search_summaries"
+echo "Tools: ask, ask_all, parallel_ask"

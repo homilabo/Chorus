@@ -13,12 +13,6 @@ Model tools:
 - ask_all: Ask all models in parallel — use for comparisons, research, multiple perspectives
 - parallel_ask: Run multiple calls (same or different providers) simultaneously
 
-Memory tools:
-- search_memory: Search past conversations
-- save_to_memory: Save important content for future retrieval
-- save_session_summary: Save session summary at end of discussion
-- search_summaries: Search session summaries
-
 Guidelines:
 - Match the user's language
 - For simple questions, answer directly without calling models
@@ -35,7 +29,7 @@ AVAILABLE_PROVIDERS = ["gemini", "copilot", "codex", "claude"]
 
 def _get_provider_fn(name: str):
     """Get the CLI call function for a provider."""
-    from chorus.cli import call_gemini, call_copilot, call_codex, call_claude
+    from cli import call_gemini, call_copilot, call_codex, call_claude
     return {
         "gemini": call_gemini,
         "copilot": call_copilot,
@@ -43,8 +37,6 @@ def _get_provider_fn(name: str):
         "claude": call_claude,
     }.get(name)
 
-
-# ─── Core tools ───
 
 @mcp.tool()
 async def ask(prompt: str, provider: str = "gemini", cwd: str = ".") -> str:
@@ -150,105 +142,6 @@ async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
             parts.append(f"{label} ({result.duration_ms}ms):\n{result.text}")
 
     return "\n\n---\n\n".join(parts)
-
-
-# ─── Memory tools ───
-
-_current_session_id = None
-
-
-def _get_memory():
-    from chorus.memory import Memory
-    if not hasattr(_get_memory, "_instance"):
-        _get_memory._instance = Memory()
-    return _get_memory._instance
-
-
-def _ensure_session():
-    global _current_session_id
-    if not _current_session_id:
-        memory = _get_memory()
-        session = memory.create_session()
-        _current_session_id = session.id
-    return _current_session_id
-
-
-@mcp.tool()
-async def save_to_memory(content: str, provider: str = "user", role: str = "assistant") -> str:
-    """Save content to Chorus memory for future retrieval via search_memory.
-
-    Call this to persist important findings, research results, or decisions.
-
-    Args:
-        content: The text content to save
-        provider: Who produced this (e.g. "gemini", "codex", "user", "chorus")
-        role: Message role — "user" or "assistant"
-    """
-    from chorus.models import Message
-    memory = _get_memory()
-    session_id = _ensure_session()
-    memory.save_message(session_id, Message(role=role, content=content, provider=provider))
-    return f"Saved to memory (session {session_id[:8]})."
-
-
-@mcp.tool()
-async def save_session_summary(summary: str, topics: str = "") -> str:
-    """Save a summary for the current session. Call this at the end of a research or discussion.
-
-    Args:
-        summary: 2-3 sentence summary of what was discussed
-        topics: Comma-separated key topics (e.g. "karavan, DMK, price")
-    """
-    memory = _get_memory()
-    session_id = _ensure_session()
-    msg_count = memory.get_message_count(session_id)
-    memory.save_session_summary(session_id, summary, topics, msg_count)
-    return f"Session summary saved (session {session_id[:8]})."
-
-
-@mcp.tool()
-async def search_memory(query: str, limit: int = 10) -> str:
-    """Search past conversations for relevant content using full-text search.
-
-    Args:
-        query: Search query (supports multiple words with OR logic)
-        limit: Maximum number of results to return
-    """
-    memory = _get_memory()
-    results = memory.search(query, limit)
-    if not results:
-        return "No results found."
-    parts = []
-    for r in results:
-        provider = r.get("provider", "?")
-        timestamp = r.get("timestamp", "")[:16]
-        content = r["content"][:300]
-        parts.append(f"[{provider}] {timestamp}:\n{content}")
-    return "\n\n---\n\n".join(parts)
-
-
-@mcp.tool()
-async def search_summaries(query: str, limit: int = 5) -> str:
-    """Search session summaries for high-level topic matching.
-
-    Args:
-        query: Search query
-        limit: Maximum number of results
-    """
-    memory = _get_memory()
-    results = memory.search_summaries(query, limit)
-    if not results:
-        return "No matching summaries found."
-    parts = []
-    for s in results:
-        date = s.get("created_at", "")[:10]
-        summary = s.get("summary", "")
-        topics = s.get("key_topics", "")
-        line = f"[{date}] {summary}"
-        if topics:
-            line += f" (topics: {topics})"
-        parts.append(line)
-    return "\n\n".join(parts)
 
 
 if __name__ == "__main__":

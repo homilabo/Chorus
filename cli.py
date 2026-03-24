@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from chorus.config import get_provider_config
+from config import get_provider_config
 
 
 @dataclass
@@ -15,13 +15,13 @@ class CLIResult:
     text: str
     error: str = ""
     duration_ms: int = 0
-    session_id: Optional[str] = None  # CLI session ID for --resume
+    session_id: Optional[str] = None
 
 
 CLEAN_ENV = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
 # In-memory session tracking — persists across MCP tool calls within same server process
-_sessions: dict[str, str] = {}  # provider -> last session_id
+_sessions: dict[str, str] = {}
 
 
 def get_session(provider: str) -> Optional[str]:
@@ -58,9 +58,8 @@ def call_copilot(prompt: str, model: str = None, timeout: int = 300, cwd: str = 
     cmd = ["copilot", "-p", prompt, "--model", model, "--allow-all", "--no-ask-user", "--output-format", "json"]
     session_id = get_session("copilot")
     if session_id:
-        cmd.append("--continue")  # Copilot uses --continue (resumes last session), not --resume <id>
+        cmd.append("--continue")
     result = _run(cmd, timeout, cwd)
-    # Mark that a session exists (Copilot doesn't return session_id, but --continue resumes last)
     if not result.error:
         set_session("copilot", "active")
     return result
@@ -83,7 +82,7 @@ def call_codex(prompt: str, model: str = None, timeout: int = 300, cwd: str = No
 
 
 def call_claude(prompt: str, model: str = None, timeout: int = 300, cwd: str = None) -> CLIResult:
-    """Call Claude CLI (used when Gemini is the conductor)."""
+    """Call Claude CLI (used when another model is the conductor)."""
     config = get_provider_config("claude") or {}
     model = model or config.get("model", "sonnet")
     timeout = config.get("timeout", timeout)
@@ -116,7 +115,6 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
 
         text = result.stdout.strip()
 
-        # If non-zero exit but stdout has content, prefer stdout
         if result.returncode != 0 and not text:
             return CLIResult(text="", error=result.stderr.strip()[:500], duration_ms=duration)
 
@@ -143,20 +141,16 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
                     event = json.loads(line)
                     etype = event.get("type", "")
                     data = event.get("data", event.get("item", {}))
-                    # Codex: item.completed
                     if etype == "item.completed":
                         item_text = data.get("text", "")
                         if item_text:
                             last_text = item_text
-                    # Copilot: assistant.message
                     elif etype == "assistant.message":
                         msg_text = data.get("content", "")
                         if msg_text:
                             last_text = msg_text
-                    # Codex: thread.started (session ID)
                     elif etype == "thread.started":
                         session_id = event.get("thread_id") or event.get("session_id")
-                    # Errors
                     elif etype in ("error", "turn.failed"):
                         last_error = event.get("message", data.get("message", ""))
                 except json.JSONDecodeError:

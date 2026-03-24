@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "chorus-ai"
-version = "0.2.0"
+name = "chorus"
+version = "0.3.0"
 description = "Multi-LLM orchestration via MCP. Your AI models, working together."
 readme = "README.md"
 license = "MIT"
@@ -13,6 +13,3 @@ dependencies = [
     "pyyaml>=6.0",
     "mcp>=1.0.0",
 ]
-
-[tool.hatch.build.targets.wheel]
-packages = ["chorus"]
