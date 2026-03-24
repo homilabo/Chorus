@@ -38,7 +38,7 @@ def call_gemini(prompt: str, model: str = None, timeout: int = 300, cwd: str = N
     config = get_provider_config("gemini") or {}
     model = model or config.get("model", "auto")
     timeout = config.get("timeout", timeout)
-    cmd = ["gemini", "-p", prompt, "--sandbox", "false", "--allowed-mcp-server-names", ""]
+    cmd = ["gemini", "-p", prompt, "--sandbox", "false", "--allowed-mcp-server-names", "", "--output-format", "json"]
     if model and model != "auto":
         cmd.extend(["--model", model])
     session_id = get_session("gemini")
