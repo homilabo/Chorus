@@ -5,6 +5,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 from chorus.config import get_provider_config
 
@@ -14,9 +15,22 @@ class CLIResult:
     text: str
     error: str = ""
     duration_ms: int = 0
+    session_id: Optional[str] = None  # CLI session ID for --resume
 
 
 CLEAN_ENV = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+
+# In-memory session tracking — persists across MCP tool calls within same server process
+_sessions: dict[str, str] = {}  # provider -> last session_id
+
+
+def get_session(provider: str) -> Optional[str]:
+    return _sessions.get(provider)
+
+
+def set_session(provider: str, session_id: str):
+    if session_id:
+        _sessions[provider] = session_id
 
 
 def call_gemini(prompt: str, model: str = None, timeout: int = 300, cwd: str = None) -> CLIResult:
@@ -27,7 +41,13 @@ def call_gemini(prompt: str, model: str = None, timeout: int = 300, cwd: str = N
     cmd = ["gemini", "-p", prompt, "--sandbox", "false", "--allowed-mcp-server-names", ""]
     if model and model != "auto":
         cmd.extend(["--model", model])
-    return _run(cmd, timeout, cwd)
+    session_id = get_session("gemini")
+    if session_id:
+        cmd.extend(["--resume", session_id])
+    result = _run(cmd, timeout, cwd)
+    if result.session_id:
+        set_session("gemini", result.session_id)
+    return result
 
 
 def call_copilot(prompt: str, model: str = None, timeout: int = 300, cwd: str = None) -> CLIResult:
@@ -36,7 +56,13 @@ def call_copilot(prompt: str, model: str = None, timeout: int = 300, cwd: str = 
     model = model or config.get("model", "gpt-5-mini")
     timeout = config.get("timeout", timeout)
     cmd = ["copilot", "-p", prompt, "--model", model, "--allow-all", "--no-ask-user", "-s"]
-    return _run(cmd, timeout, cwd)
+    session_id = get_session("copilot")
+    if session_id:
+        cmd.extend(["--resume", session_id])
+    result = _run(cmd, timeout, cwd)
+    if result.session_id:
+        set_session("copilot", result.session_id)
+    return result
 
 
 def call_codex(prompt: str, model: str = None, timeout: int = 300, cwd: str = None) -> CLIResult:
@@ -44,8 +70,15 @@ def call_codex(prompt: str, model: str = None, timeout: int = 300, cwd: str = No
     config = get_provider_config("codex") or {}
     model = model or config.get("model", "gpt-5.4")
     timeout = config.get("timeout", timeout)
-    cmd = ["codex", "exec", prompt, "--model", model, "--full-auto", "--json", "--skip-git-repo-check"]
-    return _run(cmd, timeout, cwd)
+    session_id = get_session("codex")
+    if session_id:
+        cmd = ["codex", "exec", "resume", session_id, prompt, "--model", model, "--full-auto", "--json", "--skip-git-repo-check"]
+    else:
+        cmd = ["codex", "exec", prompt, "--model", model, "--full-auto", "--json", "--skip-git-repo-check"]
+    result = _run(cmd, timeout, cwd)
+    if result.session_id:
+        set_session("codex", result.session_id)
+    return result
 
 
 def call_claude(prompt: str, model: str = None, timeout: int = 300, cwd: str = None) -> CLIResult:
@@ -61,7 +94,13 @@ def call_claude(prompt: str, model: str = None, timeout: int = 300, cwd: str = N
         "--dangerously-skip-permissions",
         "--max-turns", max_turns,
     ]
-    return _run(cmd, timeout, cwd, env=CLEAN_ENV)
+    session_id = get_session("claude")
+    if session_id:
+        cmd.extend(["--resume", session_id])
+    result = _run(cmd, timeout, cwd, env=CLEAN_ENV)
+    if result.session_id:
+        set_session("claude", result.session_id)
+    return result
 
 
 def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResult:
@@ -76,7 +115,7 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
 
         text = result.stdout.strip()
 
-        # If non-zero exit but stdout has content, prefer stdout (some CLIs emit warnings to stderr)
+        # If non-zero exit but stdout has content, prefer stdout
         if result.returncode != 0 and not text:
             return CLIResult(text="", error=result.stderr.strip()[:500], duration_ms=duration)
 
@@ -84,9 +123,11 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
             return CLIResult(text="", error="Empty response", duration_ms=duration)
 
         # Try JSON parse, fall back to raw text
+        session_id = None
         try:
             data = json.loads(text)
             parsed = data.get("result", data.get("response", data.get("text", "")))
+            session_id = data.get("session_id", data.get("sessionId"))
             if parsed:
                 text = str(parsed)
         except json.JSONDecodeError:
@@ -104,6 +145,8 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
                         item_text = event.get("item", {}).get("text", "")
                         if item_text:
                             last_text = item_text
+                    elif etype == "thread.started":
+                        session_id = event.get("thread_id") or event.get("session_id")
                     elif etype in ("error", "turn.failed"):
                         last_error = event.get("message", event.get("error", {}).get("message", ""))
                 except json.JSONDecodeError:
@@ -111,9 +154,9 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
             if last_text:
                 text = last_text
             elif last_error:
-                return CLIResult(text="", error=last_error, duration_ms=duration)
+                return CLIResult(text="", error=last_error, duration_ms=duration, session_id=session_id)
 
-        return CLIResult(text=text, duration_ms=duration)
+        return CLIResult(text=text, duration_ms=duration, session_id=session_id)
 
     except subprocess.TimeoutExpired:
         duration = int((time.time() - start) * 1000)
