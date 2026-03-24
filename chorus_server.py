@@ -1,4 +1,5 @@
 """Chorus MCP server — multi-model orchestration via CLI subscriptions."""
+from __future__ import annotations
 
 import asyncio
 
