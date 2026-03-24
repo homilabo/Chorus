@@ -30,23 +30,15 @@ The conductor handles everything else — debates, critiques, research synthesis
 **Requirements:** Python 3.10+ and at least one CLI subscription.
 
 ```bash
-# 1. Clone
+# 1. Clone and setup (creates venv, installs deps, registers with all CLIs)
 git clone https://github.com/willynikes/chorus.git
-cd chorus
+cd chorus && ./setup_mcp.sh
 
-# 2. Install dependencies
-python3 -m venv .venv
-source .venv/bin/activate
-pip install pyyaml mcp
-
-# 3. Register MCP server (auto-detects installed CLIs)
-./setup_mcp.sh
-
-# 4. Open any CLI
+# 2. Open any CLI
 claude   # or: gemini, copilot, codex
 ```
 
-That's it. The conductor will automatically discover Chorus tools.
+That's it. The setup script auto-detects installed CLIs and registers Chorus with each one.
 
 ## Configuration
 

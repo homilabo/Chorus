@@ -7,12 +7,18 @@ SERVER="$DIR/chorus_server.py"
 echo "Chorus MCP Setup"
 echo "================"
 
-# Check Python venv
+# Create venv and install dependencies if needed
 if [ ! -f "$PYTHON" ]; then
-    echo "ERROR: Python venv not found. Run first:"
-    echo "  python3 -m venv .venv && source .venv/bin/activate && pip install pyyaml mcp"
-    exit 1
+    echo "Setting up Python environment..."
+    python3 -m venv "$DIR/.venv"
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to create venv. Is Python 3.10+ installed?"
+        exit 1
+    fi
 fi
+
+echo "Installing dependencies..."
+"$PYTHON" -m pip install --quiet pyyaml mcp 2>&1 | tail -1
 
 REGISTERED=0
 
