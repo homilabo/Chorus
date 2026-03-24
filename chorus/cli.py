@@ -22,9 +22,11 @@ CLEAN_ENV = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 def call_gemini(prompt: str, model: str = None, timeout: int = 300, cwd: str = None) -> CLIResult:
     """Call Gemini CLI."""
     config = get_provider_config("gemini") or {}
-    model = model or config.get("model", "gemini-2.5-pro")
+    model = model or config.get("model", "auto")
     timeout = config.get("timeout", timeout)
-    cmd = ["gemini", "-p", prompt, "--model", model, "--sandbox", "false", "--allowed-mcp-server-names", ""]
+    cmd = ["gemini", "-p", prompt, "--sandbox", "false", "--allowed-mcp-server-names", ""]
+    if model and model != "auto":
+        cmd.extend(["--model", model])
     return _run(cmd, timeout, cwd)
 
 
