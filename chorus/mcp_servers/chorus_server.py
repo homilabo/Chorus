@@ -87,6 +87,48 @@ async def ask_all(prompt: str, exclude: list[str] = None, cwd: str = ".") -> str
 
 
 @mcp.tool()
+async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
+    """Run multiple ask calls in parallel. Each task specifies a provider and prompt.
+
+    Use this when you need to call the same or different providers multiple times simultaneously.
+    All tasks run at the same time — total time equals the slowest task.
+
+    Args:
+        tasks: List of objects with "provider" and "prompt" keys.
+               Example: [{"provider": "copilot", "prompt": "question 1"}, {"provider": "gemini", "prompt": "question 2"}]
+        cwd: Working directory for file operations
+    """
+    if not tasks:
+        return "No tasks provided."
+
+    loop = asyncio.get_event_loop()
+
+    async def _call(idx, task):
+        provider = task.get("provider", "gemini")
+        prompt = task.get("prompt", "")
+        fn = _get_provider_fn(provider)
+        if not fn:
+            return idx, provider, None, f"Unknown provider: {provider}"
+        result = await loop.run_in_executor(None, lambda: fn(prompt, cwd=cwd))
+        return idx, provider, result, None
+
+    jobs = [_call(i, t) for i, t in enumerate(tasks)]
+    results = await asyncio.gather(*jobs)
+
+    parts = []
+    for idx, provider, result, error in sorted(results, key=lambda x: x[0]):
+        label = f"**[{idx+1}] {provider.upper()}**"
+        if error:
+            parts.append(f"{label}: ERROR — {error}")
+        elif result.error:
+            parts.append(f"{label}: ERROR — {result.error}")
+        else:
+            parts.append(f"{label} ({result.duration_ms}ms):\n{result.text}")
+
+    return "\n\n---\n\n".join(parts)
+
+
+@mcp.tool()
 async def debate(prompt: str, rounds: int = 2, exclude: list[str] = None, cwd: str = ".") -> str:
     """Run a multi-round debate between models on a topic.
 
