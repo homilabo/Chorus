@@ -1,8 +1,25 @@
 """Chorus MCP server — multi-model orchestration via CLI subscriptions."""
 
 import asyncio
+import os
 
 from mcp.server.fastmcp import FastMCP
+
+
+def _detect_conductor() -> str | None:
+    """Detect which CLI is the conductor (host) to prevent recursive calls."""
+    if os.environ.get("CLAUDECODE"):
+        return "claude"
+    if os.environ.get("GEMINI_CLI_IDE_SERVER_PORT") or os.environ.get("GEMINI_CLI"):
+        return "gemini"
+    if os.environ.get("CODEX_CLI") or os.environ.get("CODEX"):
+        return "codex"
+    if os.environ.get("COPILOT_CLI") or "copilotCli" in os.environ.get("PATH", ""):
+        return "copilot"
+    return None
+
+
+CONDUCTOR = _detect_conductor()
 
 mcp = FastMCP(
     "chorus",
@@ -53,6 +70,9 @@ async def ask(prompt: str, provider: str = "gemini", cwd: str = ".") -> str:
         provider: Which model to ask (gemini, copilot, codex, claude)
         cwd: Working directory for file operations
     """
+    if provider == CONDUCTOR:
+        return f"[BLOCKED] {provider} is the current conductor — cannot call itself. Use a different provider."
+
     fn = _get_provider_fn(provider)
     if not fn:
         return f"Unknown provider: {provider}. Available: {', '.join(AVAILABLE_PROVIDERS)}"
@@ -78,6 +98,9 @@ async def ask_all(prompt: str, exclude: list[str] = None, cwd: str = ".") -> str
         cwd: Working directory for file operations
     """
     exclude = exclude or []
+    # Auto-exclude conductor to prevent recursive calls
+    if CONDUCTOR and CONDUCTOR not in exclude:
+        exclude.append(CONDUCTOR)
     active = {name: _get_provider_fn(name) for name in AVAILABLE_PROVIDERS if name not in exclude}
 
     if not active:
@@ -122,6 +145,8 @@ async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
     async def _call(idx, task):
         provider = task.get("provider", "gemini")
         prompt = task.get("prompt", "")
+        if provider == CONDUCTOR:
+            return idx, provider, None, f"{provider} is the conductor — cannot call itself"
         fn = _get_provider_fn(provider)
         if not fn:
             return idx, provider, None, f"Unknown provider: {provider}"
