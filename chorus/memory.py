@@ -1,4 +1,4 @@
-"""Shared memory - SQLite + FTS5 for cross-session knowledge."""
+"""Shared memory — SQLite + FTS5 for cross-session knowledge."""
 
 import json
 import logging
@@ -32,7 +32,6 @@ class Memory:
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL DEFAULT '',
-                provider_sessions TEXT DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -79,19 +78,15 @@ class Memory:
         """)
         self.conn.commit()
 
-    # ─── FTS5 Query Builder ───
-
     def _build_fts_query(self, query: str) -> str:
         """Build an OR-based FTS5 query with prefix matching."""
-        # Strip FTS5 special characters
         cleaned = re.sub(r'["\'\*\(\)\{\}\[\]:^~!@#$%&]', ' ', query)
         words = [w.strip() for w in cleaned.split() if w.strip() and len(w.strip()) > 1]
         if not words:
             return query
-        # Join with OR and add prefix matching
         return " OR ".join(f'"{w}"*' for w in words)
 
-    # ─── Session Management ───
+    # ─── Sessions ───
 
     def create_session(self, title: str = "") -> Session:
         session = Session(
@@ -100,8 +95,8 @@ class Memory:
             created_at=datetime.now().isoformat(),
         )
         self.conn.execute(
-            "INSERT INTO sessions (id, title, provider_sessions, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (session.id, session.title, json.dumps(session.provider_sessions), session.created_at, session.created_at),
+            "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (session.id, session.title, session.created_at, session.created_at),
         )
         self.conn.commit()
         return session
@@ -113,7 +108,7 @@ class Memory:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    # ─── Message CRUD ───
+    # ─── Messages ───
 
     def save_message(self, session_id: str, msg: Message):
         self.conn.execute(
@@ -126,58 +121,13 @@ class Memory:
         )
         self.conn.commit()
 
-    def get_session_messages(self, session_id: str, limit: int = 50) -> list[Message]:
-        rows = self.conn.execute(
-            "SELECT * FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-            (session_id, limit),
-        ).fetchall()
-        messages = []
-        for r in reversed(rows):
-            messages.append(Message(
-                role=r["role"], content=r["content"], provider=r["provider"],
-                model=r["model"], timestamp=r["timestamp"], duration_ms=r["duration_ms"],
-                cross_from=r["cross_from"],
-            ))
-        return messages
-
     def get_message_count(self, session_id: str) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?", (session_id,)
         ).fetchone()
         return row["cnt"] if row else 0
 
-    def get_recent_context(self, session_id: str, max_messages: int = 10) -> str:
-        """Build context string from recent messages for injection into prompts."""
-        messages = self.get_session_messages(session_id, limit=max_messages)
-        if not messages:
-            return ""
-        lines = []
-        for m in messages:
-            speaker = m.provider or m.role
-            if m.cross_from:
-                lines.append(f"[{speaker}, responding to {m.cross_from}]: {m.content[:500]}")
-            else:
-                lines.append(f"[{speaker}]: {m.content[:500]}")
-        return "\n".join(lines)
-
-    # ─── Provider Sessions ───
-
-    def update_provider_session(self, session_id: str, provider: str, cli_session_id: str):
-        row = self.conn.execute("SELECT provider_sessions FROM sessions WHERE id = ?", (session_id,)).fetchone()
-        if row:
-            ps = json.loads(row["provider_sessions"])
-            ps[provider] = cli_session_id
-            self.conn.execute("UPDATE sessions SET provider_sessions = ? WHERE id = ?", (json.dumps(ps), session_id))
-            self.conn.commit()
-
-    def get_provider_session(self, session_id: str, provider: str) -> Optional[str]:
-        row = self.conn.execute("SELECT provider_sessions FROM sessions WHERE id = ?", (session_id,)).fetchone()
-        if row:
-            ps = json.loads(row["provider_sessions"])
-            return ps.get(provider)
-        return None
-
-    # ─── Search (improved OR-based FTS5) ───
+    # ─── Search ───
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
         """Full-text search across all conversations with OR logic."""
@@ -194,7 +144,6 @@ class Memory:
             """, (fts_query, limit)).fetchall()
             return [dict(r) for r in rows]
         except sqlite3.OperationalError:
-            # Fallback to LIKE search if FTS5 query fails
             words = [w.strip() for w in query.split() if w.strip()]
             if not words:
                 return []
@@ -210,7 +159,7 @@ class Memory:
             """, (*like_params, limit)).fetchall()
             return [dict(r) for r in rows]
 
-    # ─── Session Summaries ───
+    # ─── Summaries ───
 
     def save_session_summary(self, session_id: str, summary: str, key_topics: str, message_count: int):
         self.conn.execute(
@@ -219,33 +168,11 @@ class Memory:
         )
         self.conn.commit()
 
-    def get_recent_summaries(self, limit: int = 5, exclude_session_id: Optional[str] = None) -> list[dict]:
-        """Get recent session summaries, optionally excluding current session."""
-        if exclude_session_id:
-            rows = self.conn.execute("""
-                SELECT ss.session_id, ss.summary, ss.key_topics, ss.message_count, ss.created_at, s.title
-                FROM session_summaries ss
-                JOIN sessions s ON s.id = ss.session_id
-                WHERE ss.session_id != ?
-                ORDER BY ss.created_at DESC
-                LIMIT ?
-            """, (exclude_session_id, limit)).fetchall()
-        else:
-            rows = self.conn.execute("""
-                SELECT ss.session_id, ss.summary, ss.key_topics, ss.message_count, ss.created_at, s.title
-                FROM session_summaries ss
-                JOIN sessions s ON s.id = ss.session_id
-                ORDER BY ss.created_at DESC
-                LIMIT ?
-            """, (limit,)).fetchall()
-        return [dict(r) for r in rows]
-
     def search_summaries(self, query: str, limit: int = 5) -> list[dict]:
         """Search session summaries by keywords."""
         words = [w.strip() for w in query.split() if w.strip()]
         if not words:
             return []
-        # LIKE search on both summary and key_topics
         clauses = []
         params = []
         for w in words:
@@ -261,6 +188,3 @@ class Memory:
             LIMIT ?
         """, (*params, limit)).fetchall()
         return [dict(r) for r in rows]
-
-    def close(self):
-        self.conn.close()
