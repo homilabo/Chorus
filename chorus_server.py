@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+
+WORKFLOW_DIR = Path.home() / "chorus" / "workflows"
 
 
 def _build_instructions() -> str:
@@ -31,6 +34,17 @@ def _build_instructions() -> str:
 
     lines.extend([
         "",
+        "Workflows:",
+        "- run_workflow: Execute a predefined multi-step workflow from ~/.chorus/workflows/",
+        "- Workflows are markdown files with numbered steps, each specifying a role and prompt",
+        "- Use run_workflow(name='list') to see available workflows",
+        "",
+        "Sessions:",
+        "- Each role maintains its own conversation session (coder, researcher, etc.)",
+        "- You can follow up with the same role and it will remember the conversation",
+        "- Treat roles like team members — give feedback, ask for corrections, iterate",
+        "- Models have full CLI access (files, terminal, web) — don't paste code, give file paths",
+        "",
         "Guidelines:",
         "- Match the user's language",
         "- For simple questions, answer directly without calling models",
@@ -38,8 +52,8 @@ def _build_instructions() -> str:
         "- Use roles to pick the right model for the task (e.g. role='researcher' for research)",
         "- For debates: call ask_all for round 1, then ask_all again with previous responses as context",
         "- For critique: use ask to send one model's response to another",
-        "- Tell the user what you're about to do before calling tools",
         "- Synthesize results by highlighting agreements, disagreements, and insights",
+        "- Keep the user informed: before each step, say what you're doing. After each response, briefly summarize what the model said before moving on.",
         "- Be natural and conversational",
     ])
 
@@ -98,11 +112,14 @@ async def ask(prompt: str, provider: str = "", role: str = "", cwd: str = ".") -
     if not fn:
         return f"Unknown provider: {provider}. Available: {', '.join(AVAILABLE_PROVIDERS)}"
 
+    # Use role as session key so each role maintains its own conversation
+    session_key = role if role else provider
+
     loop = asyncio.get_event_loop()
     if model_override:
-        result = await loop.run_in_executor(None, lambda: fn(prompt, model=model_override, cwd=cwd))
+        result = await loop.run_in_executor(None, lambda: fn(prompt, model=model_override, cwd=cwd, session_key=session_key))
     else:
-        result = await loop.run_in_executor(None, lambda: fn(prompt, cwd=cwd))
+        result = await loop.run_in_executor(None, lambda: fn(prompt, cwd=cwd, session_key=session_key))
 
     if result.error:
         return f"[{provider.upper()} ERROR] {result.error}"
@@ -198,6 +215,58 @@ async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
             parts.append(f"{label} ({result.duration_ms}ms):\n{result.text}")
 
     return "\n\n---\n\n".join(parts)
+
+
+@mcp.tool()
+async def run_workflow(name: str) -> str:
+    """Run a predefined multi-step workflow from ~/.chorus/workflows/.
+
+    Workflows are markdown files with numbered steps. Each step specifies a role
+    and a description. The conductor executes steps in order using Chorus tools,
+    crafting prompts based on the conversation context.
+
+    Args:
+        name: Workflow name (filename without .md). Use "list" to see available workflows.
+    """
+    if name == "list" or not name:
+        if not WORKFLOW_DIR.exists():
+            return f"No workflows directory. Create workflows in {WORKFLOW_DIR}/"
+        files = sorted(WORKFLOW_DIR.glob("*.md"))
+        if not files:
+            return f"No workflows found in {WORKFLOW_DIR}/"
+        items = []
+        for f in files:
+            first_line = f.read_text(encoding="utf-8").split("\n", 1)[0].strip("# \n")
+            items.append(f"- **{f.stem}**: {first_line}")
+        return "Available workflows:\n" + "\n".join(items)
+
+    path = WORKFLOW_DIR / f"{name}.md"
+    if not path.exists():
+        # Try without .md
+        path = WORKFLOW_DIR / name
+        if not path.exists():
+            files = sorted(WORKFLOW_DIR.glob("*.md")) if WORKFLOW_DIR.exists() else []
+            available = ", ".join(f.stem for f in files) if files else "none"
+            return f"Workflow '{name}' not found. Available: {available}"
+
+    content = path.read_text(encoding="utf-8")
+
+    return (
+        f"## Workflow: {name}\n\n"
+        f"{content}\n\n"
+        "---\n"
+        "INSTRUCTIONS: Execute each step IN ORDER by calling Chorus MCP tools.\n"
+        "- → role_name means: call ask(role=\"...\", prompt=your crafted prompt)\n"
+        "- → ask_all means: call ask_all(prompt=your crafted prompt)\n"
+        "- ← step N means: include that step's output as context in your prompt\n"
+        "- You craft the actual prompt for each call based on the step description.\n"
+        "- Do NOT skip steps. Do NOT do the work yourself — delegate to the models.\n"
+        "- Each model has full CLI access (file read/write, terminal, web). Use cwd parameter for file context.\n"
+        "- Do NOT paste file contents into prompts — tell the model the file path, it can read it.\n"
+        "- For code tasks, tell the model to WRITE files directly, not just describe what to write.\n"
+        "- Each role keeps its own conversation session — you can follow up naturally (e.g. 'you forgot to write the files').\n"
+        "- After all steps, give the user a final summary."
+    )
 
 
 if __name__ == "__main__":

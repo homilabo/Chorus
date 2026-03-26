@@ -24,65 +24,73 @@ CLEAN_ENV = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 _sessions: dict[str, str] = {}
 
 
-def get_session(provider: str) -> Optional[str]:
-    return _sessions.get(provider)
+def get_session(key: str) -> Optional[str]:
+    return _sessions.get(key)
 
 
-def set_session(provider: str, session_id: str):
+def set_session(key: str, session_id: str):
     if session_id:
-        _sessions[provider] = session_id
+        _sessions[key] = session_id
 
 
-def call_gemini(prompt: str, model: str = None, timeout: int = 300, cwd: str = None) -> CLIResult:
+def clear_sessions():
+    _sessions.clear()
+
+
+def call_gemini(prompt: str, model: str = None, timeout: int = 300, cwd: str = None, session_key: str = None) -> CLIResult:
     """Call Gemini CLI."""
+    key = session_key or "gemini"
     config = get_provider_config("gemini") or {}
     model = model or config.get("model", "auto")
     timeout = config.get("timeout", timeout)
     cmd = ["gemini", "-p", prompt, "--sandbox", "false", "--allowed-mcp-server-names", "", "--output-format", "json"]
     if model and model != "auto":
         cmd.extend(["--model", model])
-    session_id = get_session("gemini")
+    session_id = get_session(key)
     if session_id:
         cmd.extend(["--resume", session_id])
     result = _run(cmd, timeout, cwd)
     if result.session_id:
-        set_session("gemini", result.session_id)
+        set_session(key, result.session_id)
     return result
 
 
-def call_copilot(prompt: str, model: str = None, timeout: int = 300, cwd: str = None) -> CLIResult:
+def call_copilot(prompt: str, model: str = None, timeout: int = 300, cwd: str = None, session_key: str = None) -> CLIResult:
     """Call Copilot CLI."""
+    key = session_key or "copilot"
     config = get_provider_config("copilot") or {}
     model = model or config.get("model", "gpt-5-mini")
     timeout = config.get("timeout", timeout)
     cmd = ["copilot", "-p", prompt, "--model", model, "--allow-all", "--no-ask-user", "--output-format", "json"]
-    session_id = get_session("copilot")
+    session_id = get_session(key)
     if session_id:
         cmd.append("--continue")
     result = _run(cmd, timeout, cwd)
     if not result.error:
-        set_session("copilot", "active")
+        set_session(key, "active")
     return result
 
 
-def call_codex(prompt: str, model: str = None, timeout: int = 300, cwd: str = None) -> CLIResult:
+def call_codex(prompt: str, model: str = None, timeout: int = 300, cwd: str = None, session_key: str = None) -> CLIResult:
     """Call Codex CLI."""
+    key = session_key or "codex"
     config = get_provider_config("codex") or {}
     model = model or config.get("model", "gpt-5.4")
     timeout = config.get("timeout", timeout)
-    session_id = get_session("codex")
+    session_id = get_session(key)
     if session_id:
         cmd = ["codex", "exec", "resume", session_id, prompt, "--model", model, "--full-auto", "--json", "--skip-git-repo-check"]
     else:
         cmd = ["codex", "exec", prompt, "--model", model, "--full-auto", "--json", "--skip-git-repo-check"]
     result = _run(cmd, timeout, cwd)
     if result.session_id:
-        set_session("codex", result.session_id)
+        set_session(key, result.session_id)
     return result
 
 
-def call_claude(prompt: str, model: str = None, timeout: int = 300, cwd: str = None) -> CLIResult:
+def call_claude(prompt: str, model: str = None, timeout: int = 300, cwd: str = None, session_key: str = None) -> CLIResult:
     """Call Claude CLI (used when another model is the conductor)."""
+    key = session_key or "claude"
     config = get_provider_config("claude") or {}
     model = model or config.get("model", "sonnet")
     timeout = config.get("timeout", timeout)
@@ -94,12 +102,12 @@ def call_claude(prompt: str, model: str = None, timeout: int = 300, cwd: str = N
         "--dangerously-skip-permissions",
         "--max-turns", max_turns,
     ]
-    session_id = get_session("claude")
+    session_id = get_session(key)
     if session_id:
         cmd.extend(["--resume", session_id])
     result = _run(cmd, timeout, cwd, env=CLEAN_ENV)
     if result.session_id:
-        set_session("claude", result.session_id)
+        set_session(key, result.session_id)
     return result
 
 
