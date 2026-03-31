@@ -108,9 +108,9 @@ echo "================"
 if [ $REGISTERED -eq 0 ]; then
     echo "ERROR: No CLI providers found. Install at least one:"
     echo "  Claude:  https://docs.anthropic.com/en/docs/claude-code"
-    echo "  Gemini:  npm install -g @anthropic-ai/gemini-cli"
+    echo "  Gemini:  npm install -g @google/gemini-cli"
     echo "  Codex:   npm install -g @openai/codex"
-    echo "  Copilot: npm install -g @githubnext/github-copilot-cli"
+    echo "  Copilot: npm install -g @github/copilot"
     exit 1
 fi
 echo "Done! $REGISTERED provider(s) registered."

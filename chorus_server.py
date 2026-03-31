@@ -35,7 +35,7 @@ def _build_instructions() -> str:
     lines.extend([
         "",
         "Workflows:",
-        "- run_workflow: Execute a predefined multi-step workflow from ~/.chorus/workflows/",
+        "- run_workflow: Execute a predefined multi-step workflow from ~/chorus/workflows/",
         "- Workflows are markdown files with numbered steps, each specifying a role and prompt",
         "- Use run_workflow(name='list') to see available workflows",
         "",
@@ -219,7 +219,7 @@ async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
 
 @mcp.tool()
 async def run_workflow(name: str) -> str:
-    """Run a predefined multi-step workflow from ~/.chorus/workflows/.
+    """Run a predefined multi-step workflow from ~/chorus/workflows/.
 
     Workflows are markdown files with numbered steps. Each step specifies a role
     and a description. The conductor executes steps in order using Chorus tools,
