@@ -76,7 +76,7 @@ Run with: `run_workflow(name="code-review")` or `run_workflow(name="list")` to s
 **Requirements:** Python 3.10+ and at least one CLI subscription.
 
 ```bash
-git clone https://github.com/cankone/Chorus.git
+git clone https://github.com/homilabo/Chorus.git
 cd Chorus && ./setup_mcp.sh
 ```
 
