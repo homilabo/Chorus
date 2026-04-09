@@ -65,7 +65,15 @@ def call_copilot(prompt: str, model: str = None, timeout: int = 300, cwd: str = 
     session_id = get_session(key)
     if session_id:
         cmd.append("--continue")
-    result = _run(cmd, timeout, cwd)
+    env = {**os.environ, **{k: v for k, v in config.items() if k.startswith("env_")}}
+    # BYOK: inject provider env vars from config
+    if "base_url" in config:
+        env["COPILOT_PROVIDER_BASE_URL"] = config["base_url"]
+    if "api_key" in config:
+        env["COPILOT_PROVIDER_API_KEY"] = config["api_key"]
+    if config.get("offline"):
+        env["COPILOT_OFFLINE"] = "true"
+    result = _run(cmd, timeout, cwd, env=env)
     if not result.error:
         set_session(key, "active")
     return result

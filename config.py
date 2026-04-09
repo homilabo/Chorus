@@ -45,8 +45,7 @@ def load_config(config_path: Optional[Path] = None) -> dict[str, Any]:
 
 
 def get_config() -> dict[str, Any]:
-    if not _config:
-        load_config()
+    load_config()
     return _config
 
 
