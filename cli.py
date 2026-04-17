@@ -43,7 +43,7 @@ def call_gemini(prompt: str, model: str = None, timeout: int = 300, cwd: str = N
     config = get_provider_config("gemini") or {}
     model = model or config.get("model", "auto")
     timeout = config.get("timeout", timeout)
-    cmd = ["gemini", "-p", prompt, "--sandbox", "false", "--allowed-mcp-server-names", "", "--output-format", "json"]
+    cmd = ["gemini", "-p", prompt, "--sandbox", "false", "--output-format", "json"]
     if model and model != "auto":
         cmd.extend(["--model", model])
     session_id = get_session(key)
@@ -126,6 +126,7 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
         result = subprocess.run(
             cmd, capture_output=True, text=True,
             timeout=timeout, cwd=cwd, env=env,
+            stdin=subprocess.DEVNULL,
         )
         duration = int((time.time() - start) * 1000)
 
