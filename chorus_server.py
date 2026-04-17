@@ -42,6 +42,8 @@ def _build_instructions() -> str:
         "Sessions:",
         "- Each role maintains its own conversation session (coder, researcher, etc.)",
         "- You can follow up with the same role and it will remember the conversation",
+        "- Responses include [session: ID] — use session parameter to resume a specific conversation",
+        "- Example: ask(role='coder', session='abc-123', prompt='continue from where we left off')",
         "- Treat roles like team members — give feedback, ask for corrections, iterate",
         "- Models have full CLI access (files, terminal, web) — don't paste code, give file paths",
         "",
@@ -88,7 +90,7 @@ def _resolve_role(role: str) -> tuple[str, str | None]:
 # ─── Tools ───
 
 @mcp.tool()
-async def ask(prompt: str, provider: str = "", role: str = "", cwd: str = ".") -> str:
+async def ask(prompt: str, provider: str = "", role: str = "", session: str = "", cwd: str = ".") -> str:
     """Ask a specific AI model a question, either by provider name or by role.
 
     By role (recommended): role="researcher", role="coder", role="reasoner", role="reviewer"
@@ -100,6 +102,7 @@ async def ask(prompt: str, provider: str = "", role: str = "", cwd: str = ".") -
         prompt: The question or instruction
         role: Task role — routes to the best provider+model automatically
         provider: Direct provider name (use role instead when possible)
+        session: Session ID to resume a previous conversation (from a prior ask response)
         cwd: Working directory for file operations
     """
     model_override = None
@@ -115,6 +118,11 @@ async def ask(prompt: str, provider: str = "", role: str = "", cwd: str = ".") -
     # Use role as session key so each role maintains its own conversation
     session_key = role if role else provider
 
+    # If explicit session ID provided, inject it so the provider resumes that conversation
+    if session:
+        from cli import set_session
+        set_session(session_key, session)
+
     loop = asyncio.get_event_loop()
     if model_override:
         result = await loop.run_in_executor(None, lambda: fn(prompt, model=model_override, cwd=cwd, session_key=session_key))
@@ -123,7 +131,12 @@ async def ask(prompt: str, provider: str = "", role: str = "", cwd: str = ".") -
 
     if result.error:
         return f"[{provider.upper()} ERROR] {result.error}"
-    return result.text
+
+    # Append session ID so the caller can resume this conversation later
+    response = result.text
+    if result.session_id:
+        response += f"\n\n[session: {result.session_id}]"
+    return response
 
 
 @mcp.tool()
