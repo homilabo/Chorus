@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -21,6 +23,7 @@ def _build_instructions() -> str:
         "- ask: Ask a specific model by provider name OR by role",
         "- ask_all: Ask all models in parallel — use for comparisons, research, multiple perspectives",
         "- parallel_ask: Run multiple calls (same or different providers) simultaneously",
+        "- managed_task: Let an owner split a task, run workers in parallel, then summarize",
     ]
 
     if roles:
@@ -41,6 +44,7 @@ def _build_instructions() -> str:
         "",
         "Sessions:",
         "- Each role maintains its own conversation session (coder, researcher, etc.)",
+        "- Use agent_id for isolated same-provider workers inside one larger task",
         "- You can follow up with the same role and it will remember the conversation",
         "- Responses include [session: ID] — use session parameter to resume a specific conversation",
         "- Example: ask(role='coder', session='abc-123', prompt='continue from where we left off')",
@@ -87,16 +91,95 @@ def _resolve_role(role: str) -> tuple[str, str | None]:
     return role_cfg.get("provider", "gemini"), role_cfg.get("model")
 
 
+def _agent_session_key(provider: str, agent_id: str) -> str:
+    """Return an isolated session key for a named agent."""
+    return f"agent:{provider}:{agent_id}" if agent_id else ""
+
+
+def _role_names() -> list[str]:
+    from config import get_roles
+    return sorted(get_roles())
+
+
+def _strip_session_footer(text: str) -> str:
+    return text.split("\n\n[session:", 1)[0].strip()
+
+
+def _task_key(prompt: str, agent_prefix: str) -> str:
+    if agent_prefix:
+        return agent_prefix
+    return "managed-" + hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:8]
+
+
+def _extract_json_object(text: str) -> dict:
+    text = _strip_session_footer(text)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return {}
+    try:
+        data = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _valid_provider(provider: str) -> bool:
+    return bool(provider and _get_provider_fn(provider))
+
+
+def _valid_role(role: str) -> bool:
+    if not role:
+        return False
+    provider, _model = _resolve_role(role)
+    return bool(_get_provider_fn(provider))
+
+
+def _worker_tasks(plan_text: str, goal: str, default_worker_role: str, max_workers: int, task_key: str) -> list[dict]:
+    data = _extract_json_object(plan_text)
+    planned = data.get("tasks", [])
+    if not isinstance(planned, list):
+        planned = []
+
+    tasks = []
+    for idx, item in enumerate(planned[:max_workers], start=1):
+        if not isinstance(item, dict):
+            continue
+        worker_prompt = item.get("prompt") or item.get("goal") or item.get("task")
+        if not worker_prompt:
+            continue
+        task = {
+            "agent_id": item.get("agent_id") or f"{task_key}-worker-{idx}",
+            "prompt": worker_prompt,
+        }
+        if _valid_provider(item.get("provider", "")):
+            task["provider"] = item["provider"]
+        elif _valid_role(item.get("role", "")):
+            task["role"] = item["role"]
+        else:
+            task["role"] = default_worker_role
+        tasks.append(task)
+
+    if tasks:
+        return tasks
+    return [{
+        "role": default_worker_role,
+        "agent_id": f"{task_key}-worker-1",
+        "prompt": goal,
+    }]
+
+
 # ─── Tools ───
 
 @mcp.tool()
-async def ask(prompt: str, provider: str = "", role: str = "", session: str = "", cwd: str = ".") -> str:
+async def ask(prompt: str, provider: str = "", role: str = "", session: str = "", cwd: str = ".", agent_id: str = "") -> str:
     """Ask a specific AI model a question, either by provider name or by role.
 
     By role (recommended): role="researcher", role="coder", role="reasoner", role="reviewer"
     By provider: provider="gemini", provider="copilot", provider="codex", provider="claude"
 
     Roles map to the best provider+model for that task (configured in ~/.chorus/config.yaml).
+    agent_id creates an isolated session for this logical agent on the selected provider.
 
     Args:
         prompt: The question or instruction
@@ -104,6 +187,7 @@ async def ask(prompt: str, provider: str = "", role: str = "", session: str = ""
         provider: Direct provider name (use role instead when possible)
         session: Session ID to resume a previous conversation (from a prior ask response)
         cwd: Working directory for file operations
+        agent_id: Stable logical agent name for an isolated provider session
     """
     model_override = None
     if role:
@@ -115,8 +199,8 @@ async def ask(prompt: str, provider: str = "", role: str = "", session: str = ""
     if not fn:
         return f"Unknown provider: {provider}. Available: {', '.join(AVAILABLE_PROVIDERS)}"
 
-    # Use role as session key so each role maintains its own conversation
-    session_key = role if role else provider
+    # Use agent_id for isolated workers; otherwise preserve role/provider sessions.
+    session_key = _agent_session_key(provider, agent_id) or (role if role else provider)
 
     # If explicit session ID provided, inject it so the provider resumes that conversation
     if session:
@@ -185,7 +269,8 @@ async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
 
     Args:
         tasks: List of objects with "prompt" and either "provider" or "role" keys.
-               Example: [{"role": "coder", "prompt": "question 1"}, {"provider": "copilot", "prompt": "question 2"}]
+               Optional "agent_id" isolates same-provider sessions.
+               Example: [{"role": "coder", "agent_id": "worker-a", "prompt": "question 1"}]
         cwd: Working directory for file operations
     """
     if not tasks:
@@ -197,6 +282,7 @@ async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
         prompt = task.get("prompt", "")
         role = task.get("role", "")
         provider = task.get("provider", "")
+        agent_id = task.get("agent_id", "")
         model_override = None
 
         if role:
@@ -208,10 +294,13 @@ async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
         if not fn:
             return idx, provider, None, f"Unknown provider: {provider}"
 
+        kwargs = {"cwd": cwd}
         if model_override:
-            result = await loop.run_in_executor(None, lambda: fn(prompt, model=model_override, cwd=cwd))
-        else:
-            result = await loop.run_in_executor(None, lambda: fn(prompt, cwd=cwd))
+            kwargs["model"] = model_override
+        session_key = _agent_session_key(provider, agent_id)
+        if session_key:
+            kwargs["session_key"] = session_key
+        result = await loop.run_in_executor(None, lambda: fn(prompt, **kwargs))
         return idx, provider, result, None
 
     jobs = [_call(i, t) for i, t in enumerate(tasks)]
@@ -228,6 +317,71 @@ async def parallel_ask(tasks: list[dict], cwd: str = ".") -> str:
             parts.append(f"{label} ({result.duration_ms}ms):\n{result.text}")
 
     return "\n\n---\n\n".join(parts)
+
+
+@mcp.tool()
+async def managed_task(
+    prompt: str,
+    owner_role: str = "reasoner",
+    max_workers: int = 3,
+    cwd: str = ".",
+    agent_prefix: str = "",
+    default_worker_role: str = "coder",
+) -> str:
+    """Run a small owner -> parallel workers -> owner summary loop.
+
+    Args:
+        prompt: The task to manage
+        owner_role: Role that plans and summarizes the work
+        max_workers: Maximum number of owner-planned worker tasks, clamped to 1..5
+        cwd: Working directory for file operations
+        agent_prefix: Optional stable prefix for owner/worker session IDs
+        default_worker_role: Worker role to use only when the owner omits role/provider
+    """
+    max_workers = max(1, min(max_workers, 5))
+    key = _task_key(prompt, agent_prefix)
+    valid_roles = ", ".join(_role_names()) or "none"
+    valid_providers = ", ".join(AVAILABLE_PROVIDERS)
+
+    plan_prompt = (
+        "You are the owner for this task. Decide whether workers are needed and, "
+        f"if so, split the work into at most {max_workers} independent worker tasks.\n"
+        "Do not solve the task yourself in this step. Only create the worker plan.\n"
+        "You choose each worker's role or provider and write the worker prompts. "
+        "The orchestrator will only execute your JSON plan.\n"
+        f"Valid roles: {valid_roles}.\n"
+        f"Valid providers: {valid_providers}.\n"
+        "Return only JSON in this shape:\n"
+        '{"tasks":[{"agent_id":"worker-1","role":"coder","prompt":"specific worker task"}]}\n'
+        "Use either role or provider on each task. If you omit both, the default worker role is "
+        f"{default_worker_role}.\n\n"
+        f"Task:\n{prompt}"
+    )
+    owner_plan = await ask(plan_prompt, role=owner_role, cwd=cwd, agent_id=f"{key}-owner")
+    clean_plan = _strip_session_footer(owner_plan)
+    tasks = _worker_tasks(clean_plan, prompt, default_worker_role, max_workers, key)
+
+    worker_results = await parallel_ask(tasks, cwd=cwd)
+
+    final_prompt = (
+        "You are the owner. Summarize the worker results for the manager.\n"
+        "Be concise, call out failures or follow-up needed, and do not invent completed work.\n\n"
+        f"Original task:\n{prompt}\n\n"
+        f"Owner plan:\n{clean_plan}\n\n"
+        f"Worker results:\n{worker_results}"
+    )
+    owner_final = await ask(final_prompt, role=owner_role, cwd=cwd, agent_id=f"{key}-owner")
+
+    return (
+        "## Owner Plan\n\n"
+        f"{clean_plan}\n\n"
+        "---\n\n"
+        "## Worker Results\n\n"
+        f"{worker_results}\n\n"
+        "---\n\n"
+        "## Owner Final\n\n"
+        f"{_strip_session_footer(owner_final)}"
+    )
 
 
 @mcp.tool()
@@ -289,6 +443,89 @@ async def run_workflow(name: str) -> str:
         "- After each response, briefly summarize what the model said before moving on.\n"
         "- After all steps, give the user a final summary."
     )
+
+
+@mcp.tool()
+async def recall(
+    action: str,
+    query: str = "",
+    project: str = "",
+    session_id: str = "",
+    source: str = "",
+    limit: int = 10,
+) -> str:
+    """Search past AI-coding-agent sessions (Claude Code transcripts) for cross-session memory.
+
+    Use this when the user asks about prior work — "what did we do in project X?",
+    "where did we leave off?", "find that auth thing we discussed last week". Auto-indexes
+    incrementally on every call (read-only over ~/.claude/projects/**.jsonl).
+
+    Actions:
+        files  — most recently touched files (Tier 1, ~50 tokens). Filter with `project`.
+        list   — most recent sessions with one-line summaries. Filter with `project`/`source`.
+        search — full-text search across all turns. Filter with `project`/`source`. Use this for topic recall.
+        show   — full transcript for a session_id (use after `list` or `search`).
+        health — DB stats / latency probe.
+
+    Args:
+        action:     one of files | list | search | show | health
+        query:      search term (required for action=search)
+        project:    absolute project path filter (e.g. "/Users/cankone/Development/UML/Memoli")
+        session_id: required for action=show
+        source:     filter by source agent (currently only "claude")
+        limit:      max rows returned
+    """
+    import sys as _sys
+    from pathlib import Path as _Path
+    _here = _Path(__file__).parent
+    if str(_here) not in _sys.path:
+        _sys.path.insert(0, str(_here))
+    import chorus_recall as cr
+
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        conn = cr.db_connect()
+        try:
+            cr.index_claude(conn, verbose=False)
+            ns = type("A", (), {})()
+            ns.json = True
+            ns.pretty = False
+            ns.project = project or None
+            ns.source = source or None
+            ns.limit = limit
+            ns.query = query
+            ns.session_id = session_id
+
+            buf = []
+            class _W:
+                def write(self, s): buf.append(s)
+            real_stdout = _sys.stdout
+            _sys.stdout = _W()
+            try:
+                if action == "files":
+                    cr.cmd_files(conn, ns)
+                elif action == "list":
+                    cr.cmd_list(conn, ns)
+                elif action == "search":
+                    if not query:
+                        return '{"error":"query required for action=search"}'
+                    cr.cmd_search(conn, ns)
+                elif action == "show":
+                    if not session_id:
+                        return '{"error":"session_id required for action=show"}'
+                    cr.cmd_show(conn, ns)
+                elif action == "health":
+                    cr.cmd_health(conn, ns)
+                else:
+                    return f'{{"error":"unknown action: {action}. Use files|list|search|show|health"}}'
+            finally:
+                _sys.stdout = real_stdout
+            return "".join(buf).strip() or "[]"
+        finally:
+            conn.close()
+
+    return await loop.run_in_executor(None, _run)
 
 
 if __name__ == "__main__":
