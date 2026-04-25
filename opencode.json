@@ -1,0 +1,29 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local)",
+      "options": {
+        "baseURL": "http://localhost:11434/v1"
+      },
+      "models": {
+        "qwen3.6:27b-coding-mxfp8": {
+          "name": "Qwen 3.6 27B Coding (MXFP8)"
+        },
+        "qwen3.6:27b-coding-nvfp4": {
+          "name": "Qwen 3.6 27B Coding (NVFP4)"
+        },
+        "qwen3.6-nvfp4-thinker": {
+          "name": "Qwen 3.6 NVFP4 + structured thinking"
+        },
+        "qwen3.6-nvfp4-cool": {
+          "name": "Qwen 3.6 NVFP4 + thinking + temp 0.3"
+        },
+        "qwen3.6-thinker": {
+          "name": "Qwen 3.6 27B + thinking SYSTEM prompt"
+        }
+      }
+    }
+  }
+}
