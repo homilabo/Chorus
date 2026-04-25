@@ -64,7 +64,10 @@ def call_copilot(prompt: str, model: str = None, timeout: int = 300, cwd: str = 
     cmd = ["copilot", "-p", prompt, "--model", model, "--allow-all", "--no-ask-user", "--output-format", "json"]
     session_id = get_session(key)
     if session_id:
-        cmd.append("--continue")
+        if session_id == "active":
+            cmd.append("--continue")
+        else:
+            cmd.append(f"--resume={session_id}")
     env = {**os.environ, **{k: v for k, v in config.items() if k.startswith("env_")}}
     # BYOK: inject provider env vars from config
     if "base_url" in config:
@@ -74,7 +77,9 @@ def call_copilot(prompt: str, model: str = None, timeout: int = 300, cwd: str = 
     if config.get("offline"):
         env["COPILOT_OFFLINE"] = "true"
     result = _run(cmd, timeout, cwd, env=env)
-    if not result.error:
+    if result.session_id:
+        set_session(key, result.session_id)
+    elif not result.error:
         set_session(key, "active")
     return result
 
@@ -142,8 +147,14 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
         session_id = None
         try:
             data = json.loads(text)
-            parsed = data.get("result", data.get("response", data.get("text", "")))
             session_id = data.get("session_id", data.get("sessionId"))
+            etype = data.get("type", "")
+            event_data = data.get("data", data.get("item", {}))
+            if etype in ("error", "turn.failed"):
+                error = data.get("message") or event_data.get("message") or data.get("error") or event_data.get("error") or ""
+                if error:
+                    return CLIResult(text="", error=error, duration_ms=duration, session_id=session_id)
+            parsed = data.get("result", data.get("response", data.get("text", "")))
             if parsed:
                 text = str(parsed)
         except json.JSONDecodeError:
@@ -168,8 +179,10 @@ def _run(cmd: list, timeout: int, cwd: str = None, env: dict = None) -> CLIResul
                             last_text = msg_text
                     elif etype == "thread.started":
                         session_id = event.get("thread_id") or event.get("session_id")
+                    elif etype == "result":
+                        session_id = event.get("sessionId") or event.get("session_id") or session_id
                     elif etype in ("error", "turn.failed"):
-                        last_error = event.get("message", data.get("message", ""))
+                        last_error = event.get("message") or data.get("message") or event.get("error") or data.get("error") or ""
                 except json.JSONDecodeError:
                     continue
             if last_text:
