@@ -29,6 +29,7 @@ from pathlib import Path
 SCHEMA_VERSION = 2
 DB_PATH = Path(os.path.expanduser("~/.chorus/recall.db"))
 CLAUDE_PROJECTS = Path(os.path.expanduser("~/.claude/projects"))
+CODEX_SESSIONS = Path(os.path.expanduser("~/.codex/sessions"))
 TEXT_CAP = 8 * 1024  # bytes per turn text after curation
 
 SCHEMA = """
@@ -336,6 +337,188 @@ def index_claude(conn: sqlite3.Connection, verbose: bool = False) -> dict:
     return {"files_seen": files_seen, "files_indexed": files_indexed, "turns_added": turns_added}
 
 
+# ---------- Codex curation + indexer ----------
+
+_CODEX_WRAPPER_PREFIXES = (
+    "# AGENTS.md instructions",
+    "<environment_context>",
+    "<user_instructions>",
+    "<permissions instructions>",
+    "<INSTRUCTIONS>",
+)
+
+
+def _is_codex_wrapper(text: str) -> bool:
+    head = text.lstrip()[:80]
+    return any(head.startswith(p) for p in _CODEX_WRAPPER_PREFIXES)
+
+
+def _extract_codex_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for c in content:
+        if not isinstance(c, dict):
+            continue
+        if c.get("type") in ("input_text", "output_text", "text"):
+            txt = c.get("text") or ""
+            if txt:
+                parts.append(txt)
+    return "\n".join(parts).strip()
+
+
+def curate_codex_event(ev: dict, session_ctx: dict) -> dict | None:
+    if ev.get("type") != "response_item":
+        return None
+    payload = ev.get("payload") or {}
+    if payload.get("type") != "message":
+        return None
+    role = payload.get("role")
+    if role not in ("user", "assistant"):
+        return None
+    text = _extract_codex_text(payload.get("content"))
+    if not text:
+        return None
+    if role == "user" and _is_codex_wrapper(text):
+        return None
+    truncated = 0
+    raw = text.encode("utf-8", "replace")
+    if len(raw) > TEXT_CAP:
+        text = raw[:TEXT_CAP].decode("utf-8", "replace")
+        truncated = 1
+    return {
+        "source": "codex",
+        "project": session_ctx.get("cwd") or "",
+        "session_id": session_ctx.get("id") or "",
+        "role": role,
+        "ts": _parse_iso_ts(ev.get("timestamp") or "") or session_ctx.get("started_at", 0),
+        "text": text,
+        "truncated": truncated,
+        "files": [],
+    }
+
+
+def _read_codex_session_meta(path: Path) -> dict | None:
+    """Read line 1 of a Codex rollout file → {id, cwd, started_at}."""
+    try:
+        with path.open("rb") as f:
+            line = f.readline()
+        if not line:
+            return None
+        ev = json.loads(line)
+    except Exception:
+        return None
+    if ev.get("type") != "session_meta":
+        return None
+    p = ev.get("payload") or {}
+    cwd = p.get("cwd") or ""
+    if cwd:
+        try:
+            cwd = str(Path(cwd).expanduser().resolve())
+        except Exception:
+            pass
+    return {
+        "id": p.get("id") or "",
+        "cwd": cwd,
+        "started_at": _parse_iso_ts(p.get("timestamp") or ev.get("timestamp") or ""),
+    }
+
+
+def index_codex(conn: sqlite3.Connection, verbose: bool = False) -> dict:
+    if not CODEX_SESSIONS.exists():
+        return {"files_seen": 0, "files_indexed": 0, "turns_added": 0}
+
+    files_seen = files_indexed = turns_added = 0
+    for jsonl in CODEX_SESSIONS.rglob("rollout-*.jsonl"):
+        files_seen += 1
+        try:
+            inode, size, mtime_ns = _file_stat(jsonl)
+        except FileNotFoundError:
+            continue
+        path_s = str(jsonl)
+        row = conn.execute(
+            "SELECT inode, size, mtime_ns, last_offset FROM indexed_files WHERE path=?",
+            (path_s,),
+        ).fetchone()
+
+        start_offset = 0
+        if row:
+            prev_inode, prev_size, prev_mtime, prev_offset = row
+            if prev_inode == inode and size >= prev_size and mtime_ns >= prev_mtime:
+                if size == prev_size and mtime_ns == prev_mtime:
+                    continue
+                start_offset = prev_offset
+
+        ctx = _read_codex_session_meta(jsonl)
+        if not ctx or not ctx.get("id"):
+            continue
+
+        new_offset = start_offset
+        added = 0
+        try:
+            with conn:
+                for next_off, ev in _iter_jsonl_from_offset(jsonl, start_offset):
+                    new_offset = next_off
+                    if ev is None:
+                        continue
+                    turn = curate_codex_event(ev, ctx)
+                    if not turn:
+                        continue
+                    cur = conn.execute(
+                        "INSERT INTO turns(source, project, session_id, role, ts, text, truncated) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        (turn["source"], turn["project"], turn["session_id"], turn["role"],
+                         turn["ts"], turn["text"], turn["truncated"]),
+                    )
+                    turn_id = cur.lastrowid
+                    conn.execute(
+                        "INSERT INTO turns_fts(rowid, text, source, project, session_id, ts) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (turn_id, turn["text"], turn["source"], turn["project"],
+                         turn["session_id"], turn["ts"]),
+                    )
+                    conn.execute(
+                        "INSERT INTO sessions(source, session_id, project, started_at, last_activity, turn_count, summary) "
+                        "VALUES(?,?,?,?,?,1,?) "
+                        "ON CONFLICT(source, session_id) DO UPDATE SET "
+                        "  last_activity=MAX(last_activity, excluded.last_activity), "
+                        "  started_at=MIN(started_at, excluded.started_at), "
+                        "  turn_count=turn_count+1, "
+                        "  summary=COALESCE(sessions.summary, excluded.summary)",
+                        (turn["source"], turn["session_id"], turn["project"],
+                         turn["ts"], turn["ts"],
+                         turn["text"][:200] if turn["role"] == "user" else None),
+                    )
+                    added += 1
+                conn.execute(
+                    "INSERT INTO indexed_files(path, source, inode, size, mtime_ns, last_offset, last_indexed, error) "
+                    "VALUES(?,?,?,?,?,?,?,NULL) "
+                    "ON CONFLICT(path) DO UPDATE SET "
+                    "  inode=excluded.inode, size=excluded.size, mtime_ns=excluded.mtime_ns, "
+                    "  last_offset=excluded.last_offset, last_indexed=excluded.last_indexed, error=NULL",
+                    (path_s, "codex", inode, size, mtime_ns, new_offset, int(time.time())),
+                )
+        except Exception as e:
+            conn.execute(
+                "INSERT INTO indexed_files(path, source, last_offset, error) VALUES(?,?,?,?) "
+                "ON CONFLICT(path) DO UPDATE SET error=excluded.error",
+                (path_s, "codex", new_offset, str(e)[:500]),
+            )
+            conn.commit()
+            if verbose:
+                print(f"error indexing {path_s}: {e}", file=sys.stderr)
+            continue
+
+        if added:
+            files_indexed += 1
+            turns_added += added
+            if verbose:
+                print(f"indexed {added} turns from {jsonl.name}")
+    return {"files_seen": files_seen, "files_indexed": files_indexed, "turns_added": turns_added}
+
+
 # ---------- Queries ----------
 
 def _normalize_project(p: str | None) -> str | None:
@@ -473,13 +656,15 @@ def cmd_rebuild(conn, args):
         "DELETE FROM sessions; DELETE FROM indexed_files;"
     )
     conn.commit()
-    stats = index_claude(conn, verbose=args.verbose)
-    _emit({"rebuilt": True, **stats}, args)
+    claude = index_claude(conn, verbose=args.verbose)
+    codex = index_codex(conn, verbose=args.verbose)
+    _emit({"rebuilt": True, "claude": claude, "codex": codex}, args)
 
 
 def cmd_index(conn, args):
-    stats = index_claude(conn, verbose=args.verbose)
-    _emit(stats, args)
+    claude = index_claude(conn, verbose=args.verbose)
+    codex = index_codex(conn, verbose=args.verbose)
+    _emit({"claude": claude, "codex": codex}, args)
 
 
 # ---------- Output ----------

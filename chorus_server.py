@@ -488,6 +488,7 @@ async def recall(
         conn = cr.db_connect()
         try:
             cr.index_claude(conn, verbose=False)
+            cr.index_codex(conn, verbose=False)
             ns = type("A", (), {})()
             ns.json = True
             ns.pretty = False
